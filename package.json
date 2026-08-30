@@ -1,0 +1,23 @@
+{
+  "name": "pi-vercel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PI WEB (pi coding agent web UI) on Vercel via Vercel Sandbox + Functions.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vercel/sandbox": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0",
+    "vercel": "^40.0.0"
+  }
+}
