@@ -1,55 +1,22 @@
-// TEMP-DIAG: exercise the real sandbox boot path, reporting each phase to a
-// webhook as it completes (the HTTP response rarely reaches our test box, and a
-// long boot may be cut off by the function's own maxDuration).
-const REPORT_URL =
-  process.env.DIAG_WEBHOOK ?? 'https://webhook.site/ab875bfc-9cd5-447f-b361-512c360dab21';
-
+// TEMP-DIAG: exercise the real sandbox boot path.
+// Reports through (a) console.log -> Vercel runtime logs, (b) HTTP response body,
+// (c) a webhook when not rate-limited. Named route-handler exports (see
+// api/proxy/index.ts: default exports are legacy (req,res) and their return is
+// ignored, which hangs the function).
 const t0 = Date.now();
 
-async function post(body: Record<string, unknown>): Promise<void> {
-  try {
-    await fetch(REPORT_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ startedAt: t0, atMs: Date.now() - t0, ...body }),
-      signal: AbortSignal.timeout(10000),
-    });
-  } catch {
-    /* best effort */
-  }
+type Phase = { phase: string; event: string; ms?: number; info?: unknown; err?: string; stack?: string[] };
+const phases: Phase[] = [];
+
+function record(p: Phase): void {
+  phases.push(p);
+  const line = `[probe] ${p.phase}/${p.event}${p.ms !== undefined ? ` ms=${p.ms}` : ''}${
+    p.info !== undefined ? ` info=${JSON.stringify(p.info).slice(0, 500)}` : ''
+  }${p.err ? ` err=${p.err}` : ''}`;
+  if (p.event === 'error') console.error(line);
+  else console.log(line);
 }
 
-function shorten(v: unknown): unknown {
-  try {
-    const s = JSON.stringify(v);
-    return s && s.length > 700 ? `${s.slice(0, 700)}…` : v;
-  } catch {
-    return String(v);
-  }
-}
-
-/** Run `fn`, reporting start/ok/err to the webhook immediately. */
-async function timed<T>(name: string, fn: () => Promise<T>): Promise<T | undefined> {
-  const s = Date.now();
-  await post({ phase: name, event: 'start' });
-  try {
-    const v = await fn();
-    await post({ phase: name, event: 'ok', ms: Date.now() - s, info: shorten(v) });
-    return v;
-  } catch (e) {
-    const err = e as Error;
-    await post({
-      phase: name,
-      event: 'error',
-      ms: Date.now() - s,
-      err: `${err?.name ?? 'E'}: ${err?.message ?? String(e)}`,
-      stack: String(err?.stack ?? '').split('\n').slice(0, 5),
-    });
-    return undefined;
-  }
-}
-
-/** Vercel may hand us a relative `req.url`; never let `new URL` throw. */
 function safeUrl(u: string): URL {
   try {
     return new URL(u);
@@ -58,20 +25,34 @@ function safeUrl(u: string): URL {
   }
 }
 
+async function timed<T>(phase: string, fn: () => Promise<T>): Promise<T | undefined> {
+  const s = Date.now();
+  record({ phase, event: 'start' });
+  try {
+    const v = await fn();
+    record({ phase, event: 'ok', ms: Date.now() - s, info: v });
+    return v;
+  } catch (e) {
+    const err = e as Error;
+    record({
+      phase,
+      event: 'error',
+      ms: Date.now() - s,
+      err: `${err?.name ?? 'E'}: ${err?.message ?? String(e)}`,
+      stack: String(err?.stack ?? '').split('\n').slice(0, 6),
+    });
+    return undefined;
+  }
+}
+
 async function handler(req: Request): Promise<Response> {
   const user = safeUrl(req.url).searchParams.get('u') || 'diag-probe';
-  await post({ stage: 'start', user });
+  record({ phase: 'boot', event: 'start', info: { user, node: process.version } });
 
   const cfg = await timed('loadConfig', async () => {
     const m = await import('../src/lib/config.js');
     const c = m.loadConfig();
-    return {
-      user: c.siteUsername,
-      region: c.sandboxRegion,
-      vcpus: c.sandboxVcpus,
-      timeoutMs: c.sandboxTimeoutMs,
-      snapshotExpMs: c.sandboxSnapshotExpirationMs,
-    };
+    return { user: c.siteUsername, region: c.sandboxRegion, vcpus: c.sandboxVcpus, timeoutMs: c.sandboxTimeoutMs };
   });
 
   const ready = await timed('getReadySandbox', async () => {
@@ -81,25 +62,19 @@ async function handler(req: Request): Promise<Response> {
       cfg as any,
       user,
     );
-    return {
-      name: r.sandbox.name,
-      baseUrl: r.baseUrl,
-      created: r.created,
-      expiresAt: String(r.sandbox.expiresAt ?? ''),
-    };
+    return { name: r.sandbox.name, baseUrl: r.baseUrl, created: r.created, expiresAt: String(r.sandbox.expiresAt ?? '') };
   });
 
   if (ready?.baseUrl) {
     await timed('status:direct', async () => {
-      const r = await fetch(`${ready.baseUrl}/api/pi-web/status`, {
-        signal: AbortSignal.timeout(20000),
-      });
+      const r = await fetch(`${ready.baseUrl}/api/pi-web/status`, { signal: AbortSignal.timeout(20000) });
       return { status: r.status, body: (await r.text()).slice(0, 400) };
     });
   }
 
-  await post({ stage: 'done', totalMs: Date.now() - t0, user });
-  return new Response(JSON.stringify({ totalMs: Date.now() - t0, user, ready }, null, 2), {
+  const totalMs = Date.now() - t0;
+  record({ phase: 'boot', event: 'done', ms: totalMs, info: { ready: !!ready } });
+  return new Response(JSON.stringify({ totalMs, user, ready, phases }, null, 2), {
     headers: { 'content-type': 'application/json' },
   });
 }
