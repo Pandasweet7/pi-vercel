@@ -3,7 +3,7 @@
   "rewrites": [
     { "source": "/", "destination": "/api/proxy" },
     {
-      "source": "/((?!api/proxy/)(?!api/ping)(?!api/selftest)(?!api/report).*)",
+      "source": "/((?!api/proxy/)(?!api/ping)(?!api/selftest)(?!api/report)(?!api/probe).*)",
       "destination": "/api/proxy/$1"
     }
   ]

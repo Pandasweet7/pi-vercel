@@ -4,8 +4,9 @@ const REPORT_URL =
   process.env.DIAG_WEBHOOK ??
   'https://webhook.site/ab875bfc-9cd5-447f-b361-512c360dab21';
 
-const steps: Array<Record<string, unknown>> = [];
 const t0 = Date.now();
+
+type Step = Record<string, unknown>;
 
 async function report(body: Record<string, unknown>): Promise<string> {
   try {
@@ -21,25 +22,6 @@ async function report(body: Record<string, unknown>): Promise<string> {
   }
 }
 
-/** Run `fn` but never wait longer than `ms`. */
-function guard<T>(name: string, p: Promise<T>, ms: number): Promise<Record<string, unknown>> {
-  return Promise.race([
-    p.then(
-      (v) => ({ name, ok: true, ms: Date.now() - t0, info: safe(v) }),
-      (e) => ({
-        name,
-        ok: false,
-        ms: Date.now() - t0,
-        err: `${(e as Error)?.name ?? 'E'}: ${(e as Error)?.message ?? String(e)}`,
-        stack: String((e as Error)?.stack ?? '').split('\n').slice(0, 4),
-      }),
-    ),
-    new Promise((res) =>
-      setTimeout(() => res({ name, ok: false, ms: Date.now() - t0, err: `HUNG>${ms}ms` }), ms),
-    ),
-  ]);
-}
-
 function safe(v: unknown): unknown {
   try {
     JSON.stringify(v);
@@ -47,6 +29,24 @@ function safe(v: unknown): unknown {
   } catch {
     return String(v);
   }
+}
+
+/** Run `p` but never wait longer than `ms`; never throws. */
+function guard<T>(name: string, p: Promise<T>, ms: number): Promise<Step> {
+  const settled: Promise<Step> = p.then(
+    (v) => ({ name, ok: true, ms: Date.now() - t0, info: safe(v) }),
+    (e: Error) => ({
+      name,
+      ok: false,
+      ms: Date.now() - t0,
+      err: `${e?.name ?? 'E'}: ${e?.message ?? String(e)}`,
+      stack: String(e?.stack ?? '').split('\n').slice(0, 4),
+    }),
+  );
+  const timer: Promise<Step> = new Promise((res) => {
+    setTimeout(() => res({ name, ok: false, ms: Date.now() - t0, err: `HUNG>${ms}ms` }), ms);
+  });
+  return Promise.race([settled, timer]);
 }
 
 export default async function handler(): Promise<Response> {
@@ -61,11 +61,10 @@ export default async function handler(): Promise<Response> {
       oidc: !!process.env.VERCEL_OIDC_TOKEN,
       oidcLen: (process.env.VERCEL_OIDC_TOKEN ?? '').length,
       region: process.env.VERCEL_REGION ?? null,
-      runtime: process.env.VERCEL_RUNTIME ?? null,
     },
   });
 
-  // [1..4] guarded stages — each can hang without blocking the report.
+  const steps: Step[] = [];
   steps.push(await guard('import:sdk', import('@vercel/sandbox').then((m) => Object.keys(m)), 25000));
   steps.push(
     await guard('import:handler', import('../src/lib/handler.js').then((m) => Object.keys(m)), 25000),
