@@ -1,94 +1,231 @@
-// Sandbox lifecycle: get-or-create the per-user persistent microVM, ensure the
-// pi-web server is running inside it, and expose its URL for the proxy.
-//
-// NOTE (design): the exact @vercel/sandbox SDK method names for (a) obtaining
-// the exposed-port URL and (b) running detached commands must be confirmed
-// against the SDK reference during M1. Shapes below follow the documented
-// `Sandbox.getOrCreate({ name, timeout, onCreate, onResume })` contract.
+/**
+ * Sandbox lifecycle + provisioning.
+ *
+ * Layout inside the sandbox (all state under /data so it survives
+ * stop/snapshot/resume cycles):
+ *   /data/home        HOME (git config, shell history, dotfiles)
+ *   /data/config      XDG_CONFIG_HOME (pi agent config: /data/config/pi)
+ *   /data/pi-agent    PI_CODING_AGENT_DIR (models.json, settings.json)
+ *   /data/pi-web      PI_WEB_DATA_DIR (session daemon state, logs, pidfiles)
+ *   /data/workspaces  default workspace root
+ *
+ * Two processes run inside the sandbox (mirroring the official Docker setup):
+ *   pi-web-sessiond   unix-socket daemon owning all coding sessions
+ *   pi-web-server     HTTP server on port 8504, proxied via the Vercel Function
+ *
+ * Secrets: API keys are injected per-command at process start time only, so
+ * they are never baked into the sandbox definition or its snapshots.
+ * models.json references the gateway key via pi's $ENV_VAR interpolation.
+ */
+
 import { Sandbox } from '@vercel/sandbox';
-import type { AppConfig } from './config.ts';
-import { sandboxNameFor } from './stableId.ts';
+import type { AppConfig } from './config';
+import { sandboxNameFor } from './stableId';
+import { PI_WEB_INSTALL_SPEC } from './versions';
+
+/** Port the pi-web HTTP server listens on inside the sandbox. */
+export const PI_WEB_PORT = 8504;
+
+/** Shared (non-secret) environment for every command we run in the sandbox. */
+function baseEnv(): Record<string, string> {
+  return {
+    HOME: '/data/home',
+    XDG_CONFIG_HOME: '/data/config',
+    PI_WEB_DATA_DIR: '/data/pi-web',
+    PI_WEB_SESSIOND_SOCKET: '/data/pi-web/sessiond.sock',
+    PI_CODING_AGENT_DIR: '/data/pi-agent',
+    PI_WEB_HOST: '0.0.0.0',
+    PI_WEB_PORT: String(PI_WEB_PORT),
+    // The browser reaches pi-web through the Vercel Function proxy, so the
+    // Host header won't match the sandbox domain — allow any host.
+    PI_WEB_ALLOWED_HOSTS: 'true',
+  };
+}
+
+/**
+ * Secret env injected only at runCommand time for the pi-web processes.
+ * Never part of the sandbox definition, so it won't persist into snapshots.
+ * BYOK keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, ...) pass through as-is.
+ */
+function secretEnv(cfg: AppConfig): Record<string, string> {
+  const env: Record<string, string> = { ...cfg.byok };
+  if (cfg.aiGatewayApiKey) env.AI_GATEWAY_API_KEY = cfg.aiGatewayApiKey;
+  return env;
+}
+
+/**
+ * Bootstrap script: idempotently ensure sessiond + pi-web-server are running.
+ * Safe on fresh create, resume-from-snapshot, and already-running sandboxes:
+ *  - pidfile + `kill -0` guards (no pgrep dependency) prevent double-starts
+ *  - sessiond removes its own stale socket on startup
+ *  - HTTP readiness is probed with node fetch (curl may not be in the image)
+ */
+const BOOT_SCRIPT = String.raw`
+set -u
+mkdir -p /data/home /data/config/pi /data/pi-web/logs /data/pi-agent /data/workspaces
+
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# --- sessiond ---
+if alive /data/pi-web/sessiond.pid; then
+  echo "sessiond: already running (pid $(cat /data/pi-web/sessiond.pid))"
+else
+  echo "sessiond: starting"
+  rm -f "$PI_WEB_SESSIOND_SOCKET"
+  nohup pi-web-sessiond >>/data/pi-web/logs/sessiond.log 2>&1 &
+  echo $! > /data/pi-web/sessiond.pid
+fi
+
+for i in $(seq 1 60); do
+  [ -S "$PI_WEB_SESSIOND_SOCKET" ] && break
+  sleep 0.5
+done
+[ -S "$PI_WEB_SESSIOND_SOCKET" ] || { echo "sessiond: socket never appeared"; tail -n 40 /data/pi-web/logs/sessiond.log 2>/dev/null; exit 1; }
+
+# --- pi-web server ---
+if alive /data/pi-web/server.pid; then
+  echo "server: already running (pid $(cat /data/pi-web/server.pid))"
+else
+  echo "server: starting"
+  nohup pi-web-server >>/data/pi-web/logs/server.log 2>&1 &
+  echo $! > /data/pi-web/server.pid
+fi
+
+for i in $(seq 1 120); do
+  if node -e "fetch('http://127.0.0.1:8504/api/pi-web/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+    echo "server: ready"
+    exit 0
+  fi
+  sleep 0.5
+done
+echo "server: never became ready"
+tail -n 40 /data/pi-web/logs/server.log 2>/dev/null
+exit 1
+`;
+
+/**
+ * Write pi agent config (models.json + settings.json) for the AI gateway.
+ * The key lives in the process env ($AI_GATEWAY_API_KEY interpolation);
+ * the literal key is never written to disk.
+ */
+async function writeAgentConfig(sandbox: Sandbox, cfg: AppConfig): Promise<void> {
+  if (!cfg.aiGatewayBaseUrl || !cfg.aiGatewayModel) return;
+
+  const models = {
+    providers: {
+      gateway: {
+        baseUrl: cfg.aiGatewayBaseUrl,
+        api: 'openai-completions',
+        apiKey: '$AI_GATEWAY_API_KEY',
+        models: [{ id: cfg.aiGatewayModel, name: cfg.aiGatewayModel }],
+      },
+    },
+  };
+  const settings = {
+    defaultProvider: 'gateway',
+    defaultModel: cfg.aiGatewayModel,
+  };
+  await sandbox.writeFiles([
+    { path: '/data/pi-agent/models.json', content: JSON.stringify(models, null, 2) },
+    { path: '/data/pi-agent/settings.json', content: JSON.stringify(settings, null, 2) },
+  ]);
+}
 
 export interface ReadySandbox {
-  sandbox: InstanceType<typeof Sandbox>;
-  /** Base URL of the pi-web server's exposed port inside the sandbox. */
+  sandbox: Sandbox;
+  /** Public upstream origin of the pi-web HTTP server (https://<sub>.vercel.run) */
   baseUrl: string;
-}
-
-const PI_WEB_PORT = 8504;
-
-/**
- * Idempotently start pi-web-server inside the sandbox if it is not already
- * listening. Runs on every session (onResume) because a resumed session
- * restores the disk but NOT the running process.
- */
-async function ensureServerRunning(sbx: InstanceType<typeof Sandbox>): Promise<void> {
-  // TODO(M1): check `curl -fsS http://127.0.0.1:8504/api/pi-web/status`; if it
-  // fails, launch `pi-web-server` detached. Exact runCommand detached API per SDK.
-  await sbx.runCommand('bash', ['-lc', 'pgrep -f pi-web-server >/dev/null || (nohup pi-web-server >/tmp/pi-web-server.log 2>&1 &)']);
-}
-
-/** Write model/provider config into the sandbox on first creation. */
-async function configureProviders(sbx: InstanceType<typeof Sandbox>, cfg: AppConfig): Promise<void> {
-  // TODO(M1): materialize pi's models.json / settings.json from cfg
-  // (AI_GATEWAY_* or BYOK keys). Simpler than the EdgeOne version: point pi
-  // directly at the real gateway/BYOK endpoint (sandbox has outbound network).
-  void cfg;
-  void sbx;
-}
-
-/** Poll until the pi-web server answers its status endpoint. */
-async function waitUntilReady(baseUrl: string, timeoutMs = 60_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${baseUrl}/api/pi-web/status`, { signal: AbortSignal.timeout(2_000) });
-      if (res.ok) return;
-    } catch {
-      /* still booting */
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error('pi-web server did not become ready in time');
+  /** true if this call freshly created the sandbox; false if attached/resumed. */
+  created: boolean;
 }
 
 /**
- * Get (or create/resume) the user's sandbox and make sure pi-web is serving.
- * Persistent by default: a stopped sandbox auto-resumes from its filesystem
- * snapshot, restoring sessions, workspace files, uploads, and archives.
+ * Get (or create/resume) the per-user sandbox and ensure pi-web is serving.
  */
 export async function getReadySandbox(cfg: AppConfig, username: string): Promise<ReadySandbox> {
   const name = sandboxNameFor(username);
+
+  let created = false;
   const sandbox = await Sandbox.getOrCreate({
     name,
-    // persistent: true is the default — filesystem auto-snapshots on stop.
-    timeout: cfg.sandboxTimeoutMs,
+    resume: true,
+    region: cfg.sandboxRegion,
     ...(cfg.sandboxImage ? { image: cfg.sandboxImage } : {}),
-    onCreate: async (sbx) => {
-      if (!cfg.sandboxImage) {
-        // Managed-image path: install pi-web once (later resumes skip this via snapshot).
-        await sbx.runCommand('npm', ['install', '-g', '@jmfederico/pi-web']);
-      }
-      await configureProviders(sbx, cfg);
-      await ensureServerRunning(sbx);
-    },
-    onResume: async (sbx) => {
-      await ensureServerRunning(sbx);
+    resources: { vcpus: cfg.sandboxVcpus },
+    timeout: cfg.sandboxTimeoutMs,
+    ports: [PI_WEB_PORT],
+    persistent: true,
+    snapshotExpiration: cfg.sandboxSnapshotExpirationMs,
+    keepLastSnapshots: { count: cfg.sandboxKeepLastSnapshots },
+    env: baseEnv(),
+    onCreate: async (sb) => {
+      created = true;
+      // Install the pinned stock pi-web release (bundles pi).
+      await run(sb, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install');
+      // Seed agent config before first boot.
+      await writeAgentConfig(sb, cfg);
     },
   });
 
-  // TODO(M1): confirm the SDK call that returns the exposed-port URL for PI_WEB_PORT.
-  const baseUrl = await (sandbox as any).getHost(PI_WEB_PORT);
-  await waitUntilReady(baseUrl);
-  return { sandbox, baseUrl };
+  // Ensure processes are up (covers create, resume, and already-running).
+  await run(sandbox, cfg, ['bash', '-lc', BOOT_SCRIPT], 'boot');
+
+  // sandbox.domain() returns the full public origin for the exposed port.
+  const baseUrl = sandbox.domain(PI_WEB_PORT);
+
+  // Final readiness probe through the same network path the proxy uses.
+  await waitForStatus(baseUrl, cfg.sandboxReadyTimeoutMs);
+
+  return { sandbox, baseUrl, created };
 }
 
-/** Extend the session while the user is active so long turns aren't cut off. */
-export async function keepAlive(sandbox: InstanceType<typeof Sandbox>, cfg: AppConfig): Promise<void> {
-  try {
-    // TODO(M1): read remaining time via the `timeout` accessor; extend only when low.
-    await (sandbox as any).extendTimeout?.(cfg.sandboxTimeoutMs);
-  } catch {
-    /* best effort */
+async function run(
+  sandbox: Sandbox,
+  cfg: AppConfig,
+  argv: string[],
+  label: string,
+): Promise<void> {
+  const [cmd, ...args] = argv;
+  const result = await sandbox.runCommand({
+    cmd,
+    args,
+    env: { ...baseEnv(), ...secretEnv(cfg) },
+  });
+  if (result.exitCode !== 0) {
+    const stderr = (await result.stderr()).trim();
+    const stdout = (await result.stdout()).trim();
+    throw new Error(`sandbox ${label} failed (exit ${result.exitCode}): ${stderr || stdout}`);
   }
+}
+
+async function waitForStatus(baseUrl: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/pi-web/status`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) return;
+      lastErr = new Error(`status ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    await sleep(1500);
+  }
+  throw new Error(`pi-web not ready within ${timeoutMs}ms: ${String(lastErr)}`);
+}
+
+/** Extend the sandbox lifetime whenever it drifts past the halfway mark. */
+export async function keepAlive(sandbox: Sandbox, cfg: AppConfig): Promise<void> {
+  const expiresAt = sandbox.expiresAt;
+  if (!expiresAt) return;
+  const remaining = expiresAt.getTime() - Date.now();
+  if (remaining < cfg.sandboxTimeoutMs * 0.5) {
+    await sandbox.extendTimeout(cfg.sandboxTimeoutMs);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }

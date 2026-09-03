@@ -18,6 +18,9 @@ function forwardHeaders(src: Headers): Headers {
     const lk = key.toLowerCase();
     if (!HOP_BY_HOP.has(lk)) out.set(key, value);
   });
+  // Force identity so the upstream never gzips the body — gzip would buffer
+  // SSE / streaming responses and defeat incremental delivery (EdgeOne bug #1).
+  out.set('accept-encoding', 'identity');
   return out;
 }
 
@@ -45,7 +48,10 @@ export async function proxyHttp(req: Request, baseUrl: string, path: string): Pr
 
   // Stream the body through untouched (SSE + large payloads stay incremental).
   const responseHeaders = forwardHeaders(upstream.headers);
-  // Never let intermediate caches store dynamic pi-web responses.
+  // The body we hand out is the decoded stream — never claim an encoding it
+  // doesn't have, and never let intermediate caches store dynamic responses.
+  responseHeaders.delete('content-encoding');
+  responseHeaders.delete('content-length');
   responseHeaders.set('cache-control', 'no-store, no-cache, must-revalidate');
   return new Response(upstream.body, {
     status: upstream.status,
