@@ -1,107 +1,122 @@
-// TEMP-DIAG: out-of-band self-report. Posts its own progress to a webhook so we
-// can see how far the handler gets even when the HTTP response never returns.
+// TEMP-DIAG: single consolidated probe endpoint, reporting incrementally to a
+// webhook (our HTTP responses rarely survive the flaky edge path from the test box).
+// Every phase is POSTed as it starts/finishes so a truncated run is still readable.
 const REPORT_URL =
-  process.env.DIAG_WEBHOOK ??
-  'https://webhook.site/ab875bfc-9cd5-447f-b361-512c360dab21';
+  process.env.DIAG_WEBHOOK ?? 'https://webhook.site/ab875bfc-9cd5-447f-b361-512c360dab21';
 
+const VERSION = 'probe-v2';
 const t0 = Date.now();
 
-type Step = Record<string, unknown>;
-
-async function report(body: Record<string, unknown>): Promise<string> {
+async function post(body: Record<string, unknown>): Promise<void> {
   try {
-    const r = await fetch(REPORT_URL, {
+    await fetch(REPORT_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ts: Date.now(), startedAt: t0, ...body }),
-      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ v: VERSION, startedAt: t0, atMs: Date.now() - t0, ...body }),
+      signal: AbortSignal.timeout(10000),
     });
-    return `http=${r.status}`;
-  } catch (e) {
-    return `post-failed:${(e as Error)?.message}`;
+  } catch {
+    /* best effort */
   }
 }
 
-function safe(v: unknown): unknown {
+function shorten(v: unknown): unknown {
   try {
-    JSON.stringify(v);
-    return v;
+    const s = JSON.stringify(v);
+    return s && s.length > 900 ? `${s.slice(0, 900)}…` : v;
   } catch {
     return String(v);
   }
 }
 
-/** Run `p` but never wait longer than `ms`; never throws. */
-function guard<T>(name: string, p: Promise<T>, ms: number): Promise<Step> {
-  const settled: Promise<Step> = p.then(
-    (v) => ({ name, ok: true, ms: Date.now() - t0, info: safe(v) }),
-    (e: Error) => ({
-      name,
-      ok: false,
-      ms: Date.now() - t0,
-      err: `${e?.name ?? 'E'}: ${e?.message ?? String(e)}`,
-      stack: String(e?.stack ?? '').split('\n').slice(0, 4),
-    }),
-  );
-  const timer: Promise<Step> = new Promise((res) => {
-    setTimeout(() => res({ name, ok: false, ms: Date.now() - t0, err: `HUNG>${ms}ms` }), ms);
-  });
-  return Promise.race([settled, timer]);
+/** Run `fn`, POSTing start/ok/error around it. Never throws. */
+async function timed<T>(phase: string, fn: () => Promise<T>): Promise<T | undefined> {
+  const s = Date.now();
+  await post({ phase, event: 'start' });
+  try {
+    const v = await fn();
+    await post({ phase, event: 'ok', ms: Date.now() - s, info: shorten(v) });
+    return v;
+  } catch (e) {
+    const err = e as Error;
+    await post({
+      phase,
+      event: 'error',
+      ms: Date.now() - s,
+      err: `${err?.name ?? 'E'}: ${err?.message ?? String(e)}`,
+      stack: String(err?.stack ?? '').split('\n').slice(0, 6),
+    });
+    return undefined;
+  }
 }
 
-export default async function handler(): Promise<Response> {
-  // [0] Did we get invoked at all?
-  const posted = await report({
-    stage: 'entered',
+export default async function handler(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const user = url.searchParams.get('u') || 'diag-probe';
+  const mode = url.searchParams.get('mode') || 'full'; // list | boot | full
+
+  await post({
+    phase: 'boot',
+    event: 'entered',
+    user,
+    mode,
     env: {
       node: process.version,
-      user: !!process.env.SITE_USERNAME,
+      user: process.env.SITE_USERNAME ?? null,
       gatewayKey: !!process.env.AI_GATEWAY_API_KEY,
       gatewayBase: process.env.AI_GATEWAY_BASE_URL ?? null,
-      oidc: !!process.env.VERCEL_OIDC_TOKEN,
-      oidcLen: (process.env.VERCEL_OIDC_TOKEN ?? '').length,
       region: process.env.VERCEL_REGION ?? null,
     },
   });
 
-  const steps: Step[] = [];
-  steps.push(await guard('import:sdk', import('@vercel/sandbox').then((m) => Object.keys(m)), 25000));
-  steps.push(
-    await guard('import:handler', import('../src/lib/handler.js').then((m) => Object.keys(m)), 25000),
-  );
-  steps.push(
-    await guard(
-      'loadConfig',
-      import('../src/lib/config.js').then((m) => {
-        const c = m.loadConfig();
-        return { user: c.siteUsername, region: c.sandboxRegion, vcpus: c.sandboxVcpus };
-      }),
-      15000,
-    ),
-  );
-  steps.push(
-    await guard(
-      'sandbox:list',
-      import('@vercel/sandbox').then(async (m) => {
-        const res = (await (m.Sandbox.list() as Promise<{ items?: unknown[] }>)) ?? {};
-        return { count: (res.items ?? []).length };
-      }),
-      30000,
-    ),
-  );
-  steps.push(
-    await guard(
-      'fetch:egress',
-      fetch('https://example.com', { signal: AbortSignal.timeout(15000) }).then((r) => ({
-        status: r.status,
-      })),
-      20000,
-    ),
-  );
+  const cfg = await timed('loadConfig', async () => {
+    const m = await import('../src/lib/config.js');
+    const c = m.loadConfig();
+    return {
+      user: c.siteUsername,
+      region: c.sandboxRegion,
+      vcpus: c.sandboxVcpus,
+      timeoutMs: c.sandboxTimeoutMs,
+      snapshotExpMs: c.sandboxSnapshotExpirationMs,
+      gatewayBase: c.aiGatewayBaseUrl ?? null,
+    };
+  });
 
-  await report({ stage: 'done', totalMs: Date.now() - t0, steps, posted });
+  await timed('sandbox:list', async () => {
+    const { Sandbox } = await import('@vercel/sandbox');
+    const res = (await (Sandbox.list() as unknown as Promise<{ items?: unknown[] }>)) ?? {};
+    const items = (res.items ?? []) as Array<Record<string, unknown>>;
+    return { count: items.length, items: items.slice(0, 5) };
+  });
 
-  return new Response(JSON.stringify({ totalMs: Date.now() - t0, posted, steps }, null, 2), {
+  if (mode !== 'list') {
+    const ready = await timed('getReadySandbox', async () => {
+      const { getReadySandbox } = await import('../src/lib/sandbox.js');
+      const r = await getReadySandbox(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        cfg as any,
+        user,
+      );
+      return {
+        name: r.sandbox.name,
+        baseUrl: r.baseUrl,
+        created: r.created,
+        expiresAt: String(r.sandbox.expiresAt ?? ''),
+      };
+    });
+
+    if (ready?.baseUrl) {
+      await timed('status:direct', async () => {
+        const r = await fetch(`${ready.baseUrl}/api/pi-web/status`, {
+          signal: AbortSignal.timeout(20000),
+        });
+        return { status: r.status, body: (await r.text()).slice(0, 500) };
+      });
+    }
+  }
+
+  await post({ phase: 'boot', event: 'done', user, mode, totalMs: Date.now() - t0 });
+  return new Response(JSON.stringify({ v: VERSION, totalMs: Date.now() - t0, user, mode }), {
     headers: { 'content-type': 'application/json' },
   });
 }
