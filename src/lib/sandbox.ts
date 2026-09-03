@@ -121,29 +121,44 @@ async function ensureInstalled(sandbox: Sandbox, cfg: AppConfig): Promise<void> 
     args: ['-lc', `test -f ${INSTALL_MARKER} && echo yes || echo no`],
     env: baseEnv(),
   });
-  if ((await check.stdout()).trim() === 'yes') return;
-
-  try {
-    await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install');
-  } catch {
-    // node-pty has no linux prebuild for this Node ABI: it needs a C++
-    // toolchain for node-gyp. The sandbox runs as a non-root user, so the
-    // install needs sudo (the SDK's runCommand sudo flag).
+  if ((await check.stdout()).trim() !== 'yes') {
+    try {
+      await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install');
+    } catch {
+      // node-pty has no linux prebuild for this Node ABI: it needs a C++
+      // toolchain for node-gyp. The sandbox runs as a non-root user, so the
+      // install needs sudo (the SDK's runCommand sudo flag).
+      await sandbox.runCommand({
+        cmd: 'bash',
+        args: ['-lc', 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends make g++'],
+        env: { ...baseEnv(), ...secretEnv(cfg) },
+        sudo: true,
+      });
+      await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install-retry');
+    }
     await sandbox.runCommand({
       cmd: 'bash',
-      args: ['-lc', 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends make g++'],
-      env: { ...baseEnv(), ...secretEnv(cfg) },
-      sudo: true,
+      args: ['-lc', `touch ${INSTALL_MARKER}`],
+      env: baseEnv(),
     });
-    await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install-retry');
+    // Seed agent config after the install (models.json interpolates $AI_GATEWAY_API_KEY).
+    await writeAgentConfig(sandbox, cfg);
   }
-  await sandbox.runCommand({
-    cmd: 'bash',
-    args: ['-lc', `touch ${INSTALL_MARKER}`],
-    env: baseEnv(),
-  });
-  // Seed agent config after the install (models.json interpolates $AI_GATEWAY_API_KEY).
-  await writeAgentConfig(sandbox, cfg);
+  // npm links /usr/local/bin/pi-web-* straight to the dist .js files, but
+  // leaves them non-executable (shebang without +x) -> "Permission denied"
+  // when the boot script spawns them. Cheap to re-assert on every attach.
+  await run(
+    sandbox,
+    cfg,
+    [
+      'bash',
+      '-lc',
+      'chmod +x /usr/local/lib/node_modules/@jmfederico/pi-web/dist/server/sessiond.js ' +
+        '/usr/local/lib/node_modules/@jmfederico/pi-web/dist/server/index.js ' +
+        '/usr/local/lib/node_modules/@jmfederico/pi-web/dist/cli.js',
+    ],
+    'chmod-bins',
+  );
 }
 
 /**
