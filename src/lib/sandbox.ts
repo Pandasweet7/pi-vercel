@@ -62,7 +62,7 @@ function secretEnv(cfg: AppConfig): Record<string, string> {
  */
 const BOOT_SCRIPT = String.raw`
 set -u
-mkdir -p /data/home /data/config/pi /data/pi-web/logs /data/pi-agent /data/workspaces
+mkdir -p /data/home/projects /data/home /data/config/pi /data/pi-web/logs /data/pi-agent /data/workspaces
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 

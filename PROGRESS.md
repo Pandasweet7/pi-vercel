@@ -108,7 +108,7 @@
 | M0 | 设计确认 | ✅ 完成 |
 | M1 | Function 层：auth + sandbox + HTTP/SSE 反代 | ✅ **部署完成，端到端验证通过** |
 | M2 | 持久化验证 | ⏳ 待浏览器实测后确认 |
-| M3 | WebSocket（终端 + 事件流） | ⏳ 未开始（当前 501） |
+| M3 | WebSocket（终端 + 事件流） | ✅ **中继上线（experimental_upgradeWebSocket + ws 桥）** |
 | M4 | 自定义镜像（VCR）优化冷启动 | ⏳ 未开始（预估 2.5min → ~10s） |
 | M5 | 上线 + 部署按钮 + README | ⏳ 未开始 |
 
@@ -136,7 +136,8 @@
 - [ ] 用户浏览器实测（对话 + SSE 流式）
 - [ ] 配置 `AI_GATEWAY_*`（当前未配，对话功能需网关或 BYOK）
 - [ ] M2 持久化验证（停止→恢复后数据仍在）
-- [ ] M3 WebSocket（终端 + 事件流，当前 501）
+- [x] M3 WebSocket 中继（experimental_upgradeWebSocket + ws 桥，已实测 101 + 双向消息）
+- [ ] 浏览器实测 WS 体验（Hobby WS 连接最长 300s，客户端会自动重连）
 - [ ] M4 VCR 自定义镜像（冷启动 2.5min → ~10s）
 
 ### 通用
