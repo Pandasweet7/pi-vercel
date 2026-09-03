@@ -96,7 +96,7 @@ PI-vercel/
 ```
 
 ### M1 关键实现决策
-- ❗ **不能用 `"type": "module"`**：Vercel Node 函数把 TS 直接编成 ESM 时，Node ESM 解析器要求相对导入带扩展名，否则运行时 `ERR_MODULE_NOT_FOUND`（实际踩过）。现 package.json 不含 `type` 字段（CJS 输出），且所有相对导入统一写 `.js` 后缀，**ESM/CJS 两种输出都能解析**。
+- ❗ **`package.json` 必须保留 `"type": "module"`**：`@vercel/node` 输出的是 **ESM 语法**的 JS（不转成 require），没有该字段 Node 会把 `.js` 当 CJS 加载，报 "Cannot use import statement outside a module"（实际踩过）。同时**所有相对导入必须带 `.js` 扩展名**（Node ESM 解析器要求），否则 `ERR_MODULE_NOT_FOUND`（也踩过）。正确组合：`type: module` + 相对导入全写 `.js` 后缀。已用 `/var/task` 布局本地 ESM 冒烟测试验证（401/501/502 均符合预期）。
 - ❗ **不能用 `functions` 块配 maxDuration**：文件名的 `[[...path]]` 在 glob 里是字符类，键匹配不上会直接构建失败（"doesn't match any Serverless Functions"）；而 Hobby 默认 maxDuration 本就是 300s（上限也是 300s），该配置零收益。已删除 `functions` 块。
 - ❗ **函数必须在仓库根 `api/`**，`src/api/` 不被自动检测。
 - **SDK 3.2.1**：`getOrCreate({name, resume, region, image?, resources:{vcpus}, timeout, ports, persistent, snapshotExpiration, keepLastSnapshots:{count}, env, onCreate, onResume})`；`domain(port)` 同步返回公网 origin；`runCommand` 返回 `CommandFinished`（异步 stdout()/stderr()）。
