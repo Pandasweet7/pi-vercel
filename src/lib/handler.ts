@@ -1,35 +1,38 @@
-// Catch-all proxy handler: every request (SPA `/`, static assets, pi-web
-// `/api/*`, SSE) is rewritten by vercel.json into /api/proxy/<original-path>.
-//
-// The route uses an OPTIONAL catch-all ([[...path]].ts) so the site root "/"
-// still lands here. If Vercel does not supply path segments (e.g. for "/"),
-// we fall back to stripping the /api/proxy prefix from the request URL.
-import { loadConfig } from '../../src/lib/config.js';
-import { checkBasicAuth, unauthorizedResponse } from '../../src/lib/auth.js';
-import { getReadySandbox, keepAlive } from '../../src/lib/sandbox.js';
-import { proxyHttp } from '../../src/lib/proxy.js';
+/**
+ * Shared proxy handler logic.
+ *
+ * Two entrypoints delegate here (see /api/proxy/*):
+ *   - api/proxy/index.ts     -> site root "/"  (rewritten to /api/proxy)
+ *   - api/proxy/[...path].ts -> everything else ("/x/y" -> /api/proxy/x/y)
+ *
+ * Flow: Basic Auth -> per-user sandbox ready -> streaming reverse proxy.
+ */
+import { loadConfig } from './config.js';
+import { checkBasicAuth, unauthorizedResponse } from './auth.js';
+import { getReadySandbox, keepAlive } from './sandbox.js';
+import { proxyHttp } from './proxy.js';
 
 const PROXY_PREFIX = '/api/proxy';
 
-type PathParams = { path?: string[] };
+export type PathParams = { path?: string[] };
 
-async function extractParams(context: {
+/** Vercel may deliver `params` directly or as a Promise, depending on runtime. */
+export async function extractSegments(context: {
   params?: PathParams | Promise<PathParams>;
-}): Promise<PathParams> {
+}): Promise<string[]> {
   const p = context.params;
-  if (!p) return {};
-  return await p; // newer Vercel runtimes may deliver params as a Promise
+  if (!p) return [];
+  const resolved = await p;
+  return resolved.path ?? [];
 }
 
-function resolveTargetPath(req: Request, params: PathParams): string {
-  const segments = params.path;
-  if (segments && segments.length > 0) {
-    return '/' + segments.join('/');
-  }
-  // Fallback: reconstruct from the rewritten URL pathname.
+/** Reconstruct the original pi-web path from catch-all segments or the URL. */
+export function resolveTargetPath(req: Request, segments: string[]): string {
+  if (segments.length > 0) return '/' + segments.join('/');
   try {
     const url = new URL(req.url);
     let p = url.pathname;
+    if (p === PROXY_PREFIX || p === `${PROXY_PREFIX}/`) return '/';
     if (p.startsWith(PROXY_PREFIX)) p = p.slice(PROXY_PREFIX.length);
     if (!p.startsWith('/')) p = '/' + p;
     return p === '' ? '/' : p;
@@ -38,9 +41,9 @@ function resolveTargetPath(req: Request, params: PathParams): string {
   }
 }
 
-export default async function handler(
+export async function handleProxyRequest(
   req: Request,
-  context: { params?: PathParams | Promise<PathParams> },
+  segments: string[],
 ): Promise<Response> {
   const cfg = loadConfig();
 
@@ -52,9 +55,8 @@ export default async function handler(
   );
   if (!auth.ok) return unauthorizedResponse();
 
-  // [2] Reconstruct the original target path.
-  const params = await extractParams(context);
-  const targetPath = resolveTargetPath(req, params);
+  // [2] Original target path.
+  const targetPath = resolveTargetPath(req, segments);
 
   // [3] WebSocket upgrade? (M3 — terminal + session events.)
   const isWs = (req.headers.get('upgrade') || '').toLowerCase() === 'websocket';

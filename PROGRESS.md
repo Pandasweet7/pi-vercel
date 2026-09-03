@@ -88,7 +88,7 @@ PI-vercel/
 │  ├─ versions.ts         ✅ 版本常量（pi-web 1.202608.2, pi 0.84.4）
 │  ├─ sandbox.ts          ✅ M1：getOrCreate + BOOT_SCRIPT + waitForStatus + keepAlive
 │  └─ proxy.ts            ✅ M1：HTTP/SSE 流式反代（identity 编码；WS 待 M3）
-├─ api/proxy/[[...path]].ts ✅ M1：auth→沙箱→反代 主入口（必须在仓库根 `api/`，非 src/api）
+├─ api/proxy/index.ts + [...path].ts ✅ M1：auth→沙箱→反代 主入口（仓库根 api/）
 ├─ vercel.json              ✅ rewrites + functions 配置（maxDuration 300）
 ├─ package.json             ✅ @vercel/sandbox 3.2.1
 ├─ tsconfig.json            ✅ strict + Bundler resolution
@@ -98,13 +98,13 @@ PI-vercel/
 ### M1 关键实现决策
 - ❗ **`package.json` 必须保留 `"type": "module"`**：`@vercel/node` 输出的是 **ESM 语法**的 JS（不转成 require），没有该字段 Node 会把 `.js` 当 CJS 加载，报 "Cannot use import statement outside a module"（实际踩过）。同时**所有相对导入必须带 `.js` 扩展名**（Node ESM 解析器要求），否则 `ERR_MODULE_NOT_FOUND`（也踩过）。正确组合：`type: module` + 相对导入全写 `.js` 后缀。已用 `/var/task` 布局本地 ESM 冒烟测试验证（401/501/502 均符合预期）。
 - ❗ **不能用 `functions` 块配 maxDuration**：文件名的 `[[...path]]` 在 glob 里是字符类，键匹配不上会直接构建失败（"doesn't match any Serverless Functions"）；而 Hobby 默认 maxDuration 本就是 300s（上限也是 300s），该配置零收益。已删除 `functions` 块。
-- ❗ **函数必须在仓库根 `api/`**，`src/api/` 不被自动检测。
+- ❗ **路由入口**：不能用可选 catch-all 文件名 `[[...path]]` —— legacy `api/` 目录路由不认双括号（Next.js 的约定），会直接 404。改成两个明确入口：`api/proxy/index.ts`（根路径）+ `api/proxy/[...path].ts`（其余，单括号 catch-all），vercel.json 用两条 rewrite 分别路由 `/` 和 `/((?!api/proxy/).*)`。
 - **SDK 3.2.1**：`getOrCreate({name, resume, region, image?, resources:{vcpus}, timeout, ports, persistent, snapshotExpiration, keepLastSnapshots:{count}, env, onCreate, onResume})`；`domain(port)` 同步返回公网 origin；`runCommand` 返回 `CommandFinished`（异步 stdout()/stderr()）。
 - **幂等启动**：`onResume` 在沙箱已运行时不触发，故 getOrCreate 之后无条件跑 BOOT_SCRIPT（pidfile + kill -0 防重复；node fetch 探测 HTTP，不依赖 pgrep/curl）。
 - **两个进程**：`pi-web-sessiond`（先）→ `pi-web-server`（后），与官方 Docker 一致。
 - **密钥安全**：API key 只在 runCommand 的 per-command env 注入，不写进 `env:`（避免入快照）；models.json 用 `$AI_GATEWAY_API_KEY` 占位（pi 启动时按 env 展开）。
 - **反代**：`accept-encoding: identity` 上游 + 删响应 content-encoding/content-length + `cache-control: no-store`（防 gzip 缓冲 SSE，同 EdgeOne bug #1）。
-- **路由**：`[[...path]]` 可选 catch-all，根路径 `/` 也能命中；handler 对无 path 段时从 `request.url` 剥 `/api/proxy` 前缀还原。
+- **路径还原**：根路径由 `index.ts`（空 segments）落到 `/`；其余由 `[...path].ts` 落到 `/` + 各段。
 - **typecheck**：`npm run typecheck` 通过。
 
 ### 4 个决策点（已确认 ✅）
@@ -181,14 +181,14 @@ PI-vercel/
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
-| ❗ 函数目录 | `api/`（仓库根） | 不能用 `src/api/` |
+| ❗ 函数目录 | `api/`（仓库根） | 不能用 `src/api/`，入口用 `index.ts`+`[...path].ts`（不能用 `[[...path]]`） |
 | EdgeOne 仓库 | `/root/pi-web-makers` | 已完成，HEAD=7d2f219 |
 | EdgeOne pi-web 源码 | `/root/pi-web-src` | fork 基底，用于重建 SPA |
 | Vercel 仓库 | `/root/pi-vercel` | M1 代码完成，HEAD=0a55bec |
 | 设计文档 | `/root/pi-vercel/docs/DESIGN.md` | 完整设计（已同步 M1） |
 | Sandbox 生命周期 | `/root/pi-vercel/src/lib/sandbox.ts` | getOrCreate + BOOT_SCRIPT + keepAlive |
 | 反代 | `/root/pi-vercel/src/lib/proxy.ts` | HTTP/SSE 流式，identity 编码 |
-| 入口 handler | `/root/pi-vercel/api/proxy/[[...path]].ts` | auth→沙箱→反代（必须在根 `api/` 下，不能 `src/api`） |
+| 入口 handler | `/root/pi-vercel/api/proxy/index.ts` + `[...path].ts` | auth→沙箱→反代（仓库根 api/） |
 | 版本常量 | `/root/pi-vercel/src/lib/versions.ts` | pi-web 1.202608.2, pi 0.84.4 |
 | 稳定 ID 算法 | `/root/pi-vercel/src/lib/stableId.ts` | fnv1a，与 EdgeOne 版同算法 |
 | env 契约 | `/root/pi-vercel/.env.example` | 与 EdgeOne 版对称 + SANDBOX_* |
