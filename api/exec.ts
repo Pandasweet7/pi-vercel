@@ -26,7 +26,7 @@ async function handler(req: Request): Promise<Response> {
   let output: string;
   try {
     const sb = await Sandbox.getOrCreate({ name, resume: true, timeout: 600000 });
-    const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', cmd], env });
+    const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', cmd], env, sudo: url.searchParams.get('s') === '1' });
     const out = (await r.stdout()).slice(-8000);
     const err = (await r.stderr()).slice(-8000);
     output = `exit=${r.exitCode}\n--- stdout ---\n${out}\n--- stderr ---\n${err}`;

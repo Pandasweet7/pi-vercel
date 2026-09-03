@@ -126,12 +126,15 @@ async function ensureInstalled(sandbox: Sandbox, cfg: AppConfig): Promise<void> 
   try {
     await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install');
   } catch {
-    await run(
-      sandbox,
-      cfg,
-      ['bash', '-lc', 'apt-get update -qq && apt-get install -y -qq --no-install-recommends make g++'],
-      'apt-toolchain',
-    );
+    // node-pty has no linux prebuild for this Node ABI: it needs a C++
+    // toolchain for node-gyp. The sandbox runs as a non-root user, so the
+    // install needs sudo (the SDK's runCommand sudo flag).
+    await sandbox.runCommand({
+      cmd: 'bash',
+      args: ['-lc', 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends make g++'],
+      env: { ...baseEnv(), ...secretEnv(cfg) },
+      sudo: true,
+    });
     await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install-retry');
   }
   await sandbox.runCommand({
