@@ -1,10 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/", "destination": "/api/proxy" },
     {
-      "source": "/((?!api/proxy/)(?!api/ping)(?!api/selftest)(?!api/report)(?!api/probe)(?!api/fetchlog)(?!api/exec).*)",
-      "destination": "/api/proxy/$1"
+      "source": "/((?!api/).*)",
+      "destination": "/api/proxy"
     }
   ]
 }
