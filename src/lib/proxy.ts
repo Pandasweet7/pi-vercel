@@ -29,7 +29,13 @@ function forwardHeaders(src: Headers): Headers {
  */
 export async function proxyHttp(req: Request, baseUrl: string, path: string): Promise<Response> {
   const target = new URL(path, baseUrl);
-  const incoming = new URL(req.url);
+  // `req.url` may be relative under Vercel; resolve defensively.
+  let incoming: URL;
+  try {
+    incoming = new URL(req.url);
+  } catch {
+    incoming = new URL(req.url, 'http://vercel.internal');
+  }
   target.search = incoming.search;
 
   const headers = forwardHeaders(req.headers);

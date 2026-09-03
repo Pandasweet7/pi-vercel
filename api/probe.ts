@@ -49,8 +49,17 @@ async function timed<T>(name: string, fn: () => Promise<T>): Promise<T | undefin
   }
 }
 
+/** Vercel may hand us a relative `req.url`; never let `new URL` throw. */
+function safeUrl(u: string): URL {
+  try {
+    return new URL(u);
+  } catch {
+    return new URL(u, 'http://vercel.internal');
+  }
+}
+
 export default async function handler(req: Request): Promise<Response> {
-  const user = new URL(req.url).searchParams.get('u') || 'diag-probe';
+  const user = safeUrl(req.url).searchParams.get('u') || 'diag-probe';
   await post({ stage: 'start', user });
 
   const cfg = await timed('loadConfig', async () => {

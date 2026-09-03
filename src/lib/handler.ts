@@ -30,7 +30,7 @@ export async function extractSegments(context: {
 export function resolveTargetPath(req: Request, segments: string[]): string {
   if (segments.length > 0) return '/' + segments.join('/');
   try {
-    const url = new URL(req.url);
+    const url = requestUrl(req);
     let p = url.pathname;
     if (p === PROXY_PREFIX || p === `${PROXY_PREFIX}/`) return '/';
     if (p.startsWith(PROXY_PREFIX)) p = p.slice(PROXY_PREFIX.length);
@@ -38,6 +38,19 @@ export function resolveTargetPath(req: Request, segments: string[]): string {
     return p === '' ? '/' : p;
   } catch {
     return '/';
+  }
+}
+
+/**
+ * Vercel's Node.js web handler may deliver `request.url` as a *relative* path
+ * (e.g. "/api/proxy/foo"), so `new URL(req.url)` throws ERR_INVALID_URL.
+ * Always resolve through this helper with a placeholder base.
+ */
+export function requestUrl(req: Request): URL {
+  try {
+    return new URL(req.url);
+  } catch {
+    return new URL(req.url, 'http://vercel.internal');
   }
 }
 
