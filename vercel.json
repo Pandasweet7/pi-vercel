@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "src/api/proxy/[[...path]].ts": {
+    "api/proxy/[[...path]].ts": {
       "maxDuration": 300
     }
   },

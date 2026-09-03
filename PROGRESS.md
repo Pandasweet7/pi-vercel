@@ -81,16 +81,15 @@ Vercel Sandbox 是完整 Linux microVM（child_process/Docker/真文件系统/�
 ```
 PI-vercel/
 ├─ docs/DESIGN.md           ★ 完整设计文档（已同步 M1）
-├─ src/
-│  ├─ lib/
-│  │  ├─ stableId.ts        ✅ fnv1a(用户名) → 沙箱名
-│  │  ├─ auth.ts            ✅ Basic Auth
-│  │  ├─ config.ts          ✅ env 读取（含 SANDBOX_* 新字段）
-│  │  ├─ versions.ts        ✅ 版本常量（pi-web 1.202608.2, pi 0.84.4）
-│  │  ├─ sandbox.ts         ✅ M1：getOrCreate + BOOT_SCRIPT + waitForStatus + keepAlive
-│  │  └─ proxy.ts           ✅ M1：HTTP/SSE 流式反代（identity 编码；WS 待 M3）
-│  └─ api/proxy/[[...path]].ts ✅ M1：auth→沙箱→反代 主入口（可选 catch-all，含根路径）
-├─ vercel.json              ✅ rewrites + Function 配置（@vercel/node, 300s）
+├─ src/lib/
+│  ├─ stableId.ts         ✅ fnv1a(用户名) → 沙箱名
+│  ├─ auth.ts             ✅ Basic Auth
+│  ├─ config.ts           ✅ env 读取（含 SANDBOX_* 字段）
+│  ├─ versions.ts         ✅ 版本常量（pi-web 1.202608.2, pi 0.84.4）
+│  ├─ sandbox.ts          ✅ M1：getOrCreate + BOOT_SCRIPT + waitForStatus + keepAlive
+│  └─ proxy.ts            ✅ M1：HTTP/SSE 流式反代（identity 编码；WS 待 M3）
+├─ api/proxy/[[...path]].ts ✅ M1：auth→沙箱→反代 主入口（必须在仓库根 `api/`，非 src/api）
+├─ vercel.json              ✅ rewrites + functions 配置（maxDuration 300）
 ├─ package.json             ✅ @vercel/sandbox 3.2.1
 ├─ tsconfig.json            ✅ strict + Bundler resolution
 └─ .env.example             ✅ 完整 env 契约
@@ -177,7 +176,7 @@ PI-vercel/
 | 设计文档 | `/root/pi-vercel/docs/DESIGN.md` | 完整设计（已同步 M1） |
 | Sandbox 生命周期 | `/root/pi-vercel/src/lib/sandbox.ts` | getOrCreate + BOOT_SCRIPT + keepAlive |
 | 反代 | `/root/pi-vercel/src/lib/proxy.ts` | HTTP/SSE 流式，identity 编码 |
-| 入口 handler | `/root/pi-vercel/src/api/proxy/[[...path]].ts` | auth→沙箱→反代 |
+| 入口 handler | `/root/pi-vercel/api/proxy/[[...path]].ts` | auth→沙箱→反代（必须在根 `api/` 下，不能 `src/api`） |
 | 版本常量 | `/root/pi-vercel/src/lib/versions.ts` | pi-web 1.202608.2, pi 0.84.4 |
 | 稳定 ID 算法 | `/root/pi-vercel/src/lib/stableId.ts` | fnv1a，与 EdgeOne 版同算法 |
 | env 契约 | `/root/pi-vercel/.env.example` | 与 EdgeOne 版对称 + SANDBOX_* |

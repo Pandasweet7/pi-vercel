@@ -78,7 +78,7 @@ pi-web 可以**原样**在里面跑，暴露端口就是一个正常站点。所
                         │
                         ▼
               ┌─────────────────────────────┐
-              │  Vercel Function             │   （src/api/[...path].ts，Node runtime，fluid，streaming）
+              │  Vercel Function             │   （api/proxy/[[...path]].ts，Node runtime，fluid，streaming）
               │  1. Basic Auth               │
               │  2. stableUserId → sandbox名 │
               │  3. Sandbox.getOrCreate()    │   ── 冷则毫秒级从快照 resume（整盘还原）
@@ -167,7 +167,7 @@ pi-web 可以**原样**在里面跑，暴露端口就是一个正常站点。所
 ### 3.3 Vercel Function 层（`src/`）
 
 ```
-src/
+src/ + api/
 ├─ lib/
 │  ├─ config.ts        # 读 env（SITE_USERNAME/PASSWORD、AI_GATEWAY_*、SANDBOX_*）
 │  ├─ stableId.ts      # fnv1a(SITE_USERNAME) → 沙箱名（与 EdgeOne 版同算法）
@@ -177,6 +177,8 @@ src/
 └─ api/proxy/
    └─ [[...path]].ts   # 可选 catch-all：auth → sandbox → proxy（含根路径 /）
 ```
+
+> ⚠️ 函数**必须**在仓库根目录的 `api/` 下，不能用 `src/api/`：Vercel 的构建器自动检测规则只匹配 `api/**/*.ts`（见 `fs-detectors/detect-builders`），`src/api` 不在列表里，会导致“Function Runtimes must have a valid version”类报错。
 
 `vercel.json` 用 `rewrites` 把所有路径路由到这个可选 catch-all Function（SPA / API / WS / SSE 全走它）；用 `[[...path]]`（双括号）而非 `[...path]`，否则根路径 `/` 会匹配不到。handler 对 Vercel 未提供 path 段的情况（如 `/`）会退回从 `request.url` 剥掉 `/api/proxy` 前缀还原目标路径。
 

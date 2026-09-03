@@ -4,10 +4,10 @@
 // The route uses an OPTIONAL catch-all ([[...path]].ts) so the site root "/"
 // still lands here. If Vercel does not supply path segments (e.g. for "/"),
 // we fall back to stripping the /api/proxy prefix from the request URL.
-import { loadConfig } from '../../lib/config';
-import { checkBasicAuth, unauthorizedResponse } from '../../lib/auth';
-import { getReadySandbox, keepAlive } from '../../lib/sandbox';
-import { proxyHttp } from '../../lib/proxy';
+import { loadConfig } from '../../src/lib/config';
+import { checkBasicAuth, unauthorizedResponse } from '../../src/lib/auth';
+import { getReadySandbox, keepAlive } from '../../src/lib/sandbox';
+import { proxyHttp } from '../../src/lib/proxy';
 
 const PROXY_PREFIX = '/api/proxy';
 
