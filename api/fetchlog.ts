@@ -1,6 +1,5 @@
-// TEMP-DIAG: replicate getReadySandbox's exact getOrCreate call with fetch
-// capture, to find why the API 400s on keepLastSnapshots there.
-import { Sandbox } from '@vercel/sandbox';
+// TEMP-DIAG: capture the exact HTTP requests getReadySandbox sends, to find
+// why the API 400s on keepLastSnapshots in the real boot path.
 import { loadConfig } from '../src/lib/config.js';
 import { sandboxNameFor } from '../src/lib/stableId.js';
 
@@ -20,10 +19,12 @@ async function handler(): Promise<Response> {
       resp = await orig(input as RequestInfo, init);
     } catch (e) {
       captured.push({ url, method: init?.method, body, respBody: `FETCH_ERR: ${String(e)}` });
+      console.log('[fetchlog]', init?.method, url, 'FETCH_ERR', String(e));
       throw e;
     }
     const text = await resp.clone().text().catch(() => '');
     captured.push({ url, method: init?.method, body, status: resp.status, respBody: text.slice(0, 500) });
+    console.log('[fetchlog]', init?.method, url, '->', resp.status, (text || '').slice(0, 300));
     return resp;
   }) as typeof fetch;
 
@@ -35,28 +36,9 @@ async function handler(): Promise<Response> {
   };
 
   try {
-    const sb = await Sandbox.getOrCreate({
-      name,
-      resume: true,
-      region: cfg.sandboxRegion,
-      resources: { vcpus: cfg.sandboxVcpus },
-      timeout: cfg.sandboxTimeoutMs,
-      ports: [8504],
-      persistent: true,
-      snapshotExpiration: cfg.sandboxSnapshotExpirationMs,
-      keepLastSnapshots: { count: cfg.sandboxKeepLastSnapshots },
-      env: {
-        HOME: '/data/home',
-        XDG_CONFIG_HOME: '/data/config',
-        PI_WEB_DATA_DIR: '/data/pi-web',
-        PI_WEB_SESSIOND_SOCKET: '/data/pi-web/sessiond.sock',
-        PI_CODING_AGENT_DIR: '/data/pi-agent',
-      },
-      onCreate: async () => {
-        /* no-op for capture */
-      },
-    });
-    results.getOrCreate = { ok: true, name: sb.name, status: sb.status };
+    const { getReadySandbox } = await import('../src/lib/sandbox.js');
+    const r = await getReadySandbox(cfg, 'Tiger');
+    results.getOrCreate = { ok: true, name: r.sandbox.name, baseUrl: r.baseUrl, created: r.created };
   } catch (e) {
     results.getOrCreate = { ok: false, err: String((e as Error)?.message ?? e) };
   } finally {
