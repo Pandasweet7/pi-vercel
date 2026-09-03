@@ -10,7 +10,7 @@
 import { loadConfig } from './config.js';
 import { checkBasicAuth, unauthorizedResponse } from './auth.js';
 import { getReadySandbox, keepAlive } from './sandbox.js';
-import { proxyHttp } from './proxy.js';
+import { proxyHttp, proxyWebSocket } from './proxy.js';
 
 const PROXY_PREFIX = '/api/proxy';
 
@@ -71,24 +71,23 @@ export async function handleProxyRequest(
   // [2] Original target path.
   const targetPath = resolveTargetPath(req, segments);
 
-  // [3] WebSocket upgrade? (M3 — terminal + session events.)
+  // [3] WebSocket upgrade? (M3 — session events + terminals.)
   const isWs = (req.headers.get('upgrade') || '').toLowerCase() === 'websocket';
-  if (isWs) {
-    // TODO(M3): relay WS or bridge to SSE. For now, refuse so the failure is visible.
-    return new Response('WebSocket proxy not implemented yet (M3)', { status: 501 });
-  }
 
   try {
     // [4] Get/resume the user's sandbox and ensure pi-web is serving.
     const { sandbox, baseUrl } = await getReadySandbox(cfg, auth.username!);
 
-    // [5] Reverse-proxy (streams SSE incrementally).
-    const response = await proxyHttp(req, baseUrl, targetPath);
-
-    // [6] Keep the session alive while the user is active (fire-and-forget).
+    // [5] Keep the session alive while the user is active (fire-and-forget).
     void keepAlive(sandbox, cfg).catch(() => {});
 
-    return response;
+    if (isWs) {
+      // Relay the WebSocket to the sandbox (session events / terminal).
+      return await proxyWebSocket(req, baseUrl, targetPath);
+    }
+
+    // [6] Reverse-proxy (streams SSE incrementally).
+    return await proxyHttp(req, baseUrl, targetPath);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return new Response(`PI WEB proxy error: ${message}`, {

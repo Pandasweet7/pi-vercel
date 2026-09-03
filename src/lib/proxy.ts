@@ -1,10 +1,15 @@
 // Reverse-proxy the incoming request to the pi-web server inside the sandbox.
 // Streams responses so SSE stays incremental (never buffered).
 //
-// WebSocket handling is the open design decision (DESIGN.md §5 risk #2):
-//   option A — relay WS through the Vercel Function (public beta), or
-//   option B — bridge WS→SSE like the EdgeOne version.
-// Both are TODO(M3).
+// WebSocket relay (M3): the pi-web UI drives the chat view + terminals over
+// WebSocket events (sessions/{id}/events, terminals/{id}/socket, /events), so
+// without it the UI only paints once the REST poll catches up (message appears
+// ~when the model finishes). Vercel Functions WebSocket support (public beta)
+// accepts upgrades via experimental_upgradeWebSocket() and hands us a `ws`
+// WebSocket; we bridge it to a `ws` client connected to the sandbox.
+
+import { experimental_upgradeWebSocket } from '@vercel/functions';
+import WebSocket from 'ws';
 
 /** Headers that must not be forwarded to / from the upstream. */
 const HOP_BY_HOP = new Set([
@@ -66,4 +71,72 @@ export async function proxyHttp(req: Request, baseUrl: string, path: string): Pr
   });
 }
 
-// TODO(M3): proxyWebSocket(req, baseUrl, path) — WS relay or WS→SSE bridge.
+/**
+ * Bridge a browser WebSocket through this Function to the sandbox's pi-web.
+ * The upgrade request was already authenticated + the sandbox is ready when
+ * this is called. Returns the platform upgrade Response.
+ */
+export async function proxyWebSocket(req: Request, baseUrl: string, path: string): Promise<Response> {
+  let incoming: URL;
+  try {
+    incoming = new URL(req.url);
+  } catch {
+    incoming = new URL(req.url, 'http://vercel.internal');
+  }
+  const wsBase = baseUrl.replace(/^https:/, 'wss:');
+  const upstreamUrl = `${wsBase}${path === '' ? '/' : path}${incoming.search}`;
+
+  return experimental_upgradeWebSocket(
+    (client) => {
+      const upstream = new WebSocket(upstreamUrl);
+      // ws throws on send() before the socket is open; buffer instead.
+      const pending: Array<{ data: unknown; binary: boolean }> = [];
+
+      client.on('message', (data, isBinary) => {
+        if (upstream.readyState === WebSocket.OPEN) {
+          upstream.send(data as never, { binary: isBinary });
+        } else {
+          pending.push({ data, binary: isBinary });
+        }
+      });
+
+      upstream.on('open', () => {
+        for (const m of pending) upstream.send(m.data as never, { binary: m.binary });
+        pending.length = 0;
+      });
+      upstream.on('message', (data, isBinary) => {
+        if (client.readyState === WebSocket.OPEN) client.send(data as never, { binary: isBinary });
+      });
+
+      upstream.on('close', (code, reason) => {
+        try {
+          client.close(code, reason);
+        } catch {
+          /* already closed */
+        }
+      });
+      upstream.on('error', () => {
+        try {
+          client.close(1011, 'sandbox websocket error');
+        } catch {
+          /* already closed */
+        }
+      });
+      client.on('close', () => {
+        try {
+          upstream.close();
+        } catch {
+          /* already closed */
+        }
+      });
+      client.on('error', () => {
+        try {
+          upstream.close();
+        } catch {
+          /* already closed */
+        }
+      });
+    },
+    { maxPayload: 4 * 1024 * 1024 },
+  );
+}

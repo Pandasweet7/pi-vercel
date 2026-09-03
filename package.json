@@ -13,10 +13,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vercel/sandbox": "3.2.1"
+    "@vercel/functions": "^3.9.5",
+    "@vercel/sandbox": "3.2.1",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.5.0",
     "vercel": "^40.0.0"
   }
