@@ -51,8 +51,7 @@ async function handler(req: Request): Promise<Response> {
 
   const cfg = await timed('loadConfig', async () => {
     const m = await import('../src/lib/config.js');
-    const c = m.loadConfig();
-    return { user: c.siteUsername, region: c.sandboxRegion, vcpus: c.sandboxVcpus, timeoutMs: c.sandboxTimeoutMs };
+    return m.loadConfig();
   });
 
   const ready = await timed('getReadySandbox', async () => {
