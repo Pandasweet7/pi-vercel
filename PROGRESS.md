@@ -91,7 +91,7 @@
 - [ ] M2：停止/恢复后快照持久化验证（快照已设永不过期，keepLastSnapshots=2）
 - [ ] M3：WebSocket 反代或 WS→SSE 桥（终端 + 事件流）
 - [ ] M4：VCR 自定义镜像（预装 pi-web + 工具链），把冷启动从 ~2.5min 降到 ~10s
-- [ ] README + 部署按钮
+- [x] README + 一键部署按钮（M5）
 
 ### 关键架构决策（已落地）
 - 用 stock pi-web（`@jmfederico/pi-web@1.202608.2`，pi 0.84.4），不做 fork
@@ -110,7 +110,7 @@
 | M2 | 持久化验证 | ⏳ 待浏览器实测后确认 |
 | M3 | WebSocket（终端 + 事件流） | ✅ **中继上线（experimental_upgradeWebSocket + ws 桥）** |
 | M4 | 自定义镜像（VCR）优化冷启动 | ⏳ 未开始（预估 2.5min → ~10s） |
-| M5 | 上线 + 部署按钮 + README | ⏳ 未开始 |
+| M5 | 上线 + README + 一键部署按钮 | ✅ 完成（README 含 Vercel Deploy 按钮 + env 表） |
 
 
 ## 三、两个仓库的关系
@@ -133,9 +133,10 @@
 - [x] GitHub 仓库 `Pandasweet7/pi-vercel` 已建并推送（main）
 - [x] Vercel 项目 `pi-vercel` 已连，生产域名 pi-vercel-mu.vercel.app
 - [x] M1 部署实测：Basic Auth/首页/反代/URL 不泄露 全部验证通过
-- [ ] 用户浏览器实测（对话 + SSE 流式）
-- [ ] 配置 `AI_GATEWAY_*`（当前未配，对话功能需网关或 BYOK）
-- [ ] M2 持久化验证（停止→恢复后数据仍在）
+- [x] 用户浏览器实测：对话已通（WS M3 修复延迟渲染）
+- [ ] 继续实测：流式渲染 / 终端 / 长会话
+- [x] 模型可用（BYOK NVIDIA）；用户决定改走 pi 内置供应商 → 需按需增删 Vercel env key
+- [ ] M2 持久化验证（停止→恢复后数据仍在）— 用户浏览器实测确认中
 - [x] M3 WebSocket 中继（experimental_upgradeWebSocket + ws 桥，已实测 101 + 双向消息）
 - [ ] 浏览器实测 WS 体验（Hobby WS 连接最长 300s，客户端会自动重连）
 - [ ] M4 VCR 自定义镜像（冷启动 2.5min → ~10s）
