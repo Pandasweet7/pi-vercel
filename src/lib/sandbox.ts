@@ -103,6 +103,46 @@ tail -n 40 /data/pi-web/logs/server.log 2>/dev/null
 exit 1
 `;
 
+const INSTALL_MARKER = '/data/pi-web/.installed';
+
+/**
+ * Ensure the pinned stock pi-web release is installed (idempotent, runs on
+ * create AND resume/attach — a sandbox whose onCreate install died mid-way
+ * heals itself here).
+ *
+ * node-pty (pi-web dep) has no linux prebuild for the sandbox's Node ABI, so
+ * its install script falls back to `node-gyp rebuild`, which needs a C++
+ * toolchain. On first failure we `apt-get install` make/g++ once and retry;
+ * with tools present, npm's cache makes the retry cheap.
+ */
+async function ensureInstalled(sandbox: Sandbox, cfg: AppConfig): Promise<void> {
+  const check = await sandbox.runCommand({
+    cmd: 'bash',
+    args: ['-lc', `test -f ${INSTALL_MARKER} && echo yes || echo no`],
+    env: baseEnv(),
+  });
+  if ((await check.stdout()).trim() === 'yes') return;
+
+  try {
+    await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install');
+  } catch {
+    await run(
+      sandbox,
+      cfg,
+      ['bash', '-lc', 'apt-get update -qq && apt-get install -y -qq --no-install-recommends make g++'],
+      'apt-toolchain',
+    );
+    await run(sandbox, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install-retry');
+  }
+  await sandbox.runCommand({
+    cmd: 'bash',
+    args: ['-lc', `touch ${INSTALL_MARKER}`],
+    env: baseEnv(),
+  });
+  // Seed agent config after the install (models.json interpolates $AI_GATEWAY_API_KEY).
+  await writeAgentConfig(sandbox, cfg);
+}
+
 /**
  * Write pi agent config (models.json + settings.json) for the AI gateway.
  * The key lives in the process env ($AI_GATEWAY_API_KEY interpolation);
@@ -158,14 +198,13 @@ export async function getReadySandbox(cfg: AppConfig, username: string): Promise
     snapshotExpiration: cfg.sandboxSnapshotExpirationMs,
     keepLastSnapshots: { count: cfg.sandboxKeepLastSnapshots },
     env: baseEnv(),
-    onCreate: async (sb) => {
+    onCreate: async () => {
       created = true;
-      // Install the pinned stock pi-web release (bundles pi).
-      await run(sb, cfg, ['npm', 'install', '-g', PI_WEB_INSTALL_SPEC], 'install');
-      // Seed agent config before first boot.
-      await writeAgentConfig(sb, cfg);
     },
   });
+
+  // Install pi-web if missing (covers fresh create, resume, and interrupted installs).
+  await ensureInstalled(sandbox, cfg);
 
   // Ensure processes are up (covers create, resume, and already-running).
   await run(sandbox, cfg, ['bash', '-lc', BOOT_SCRIPT], 'boot');
