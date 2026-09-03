@@ -68,6 +68,17 @@ pi-web 可以**原样**在里面跑，暴露端口就是一个正常站点。所
   - `sandbox.expiresAt`（Date | undefined）+ `sandbox.extendTimeout(ms)`。
   - `sandbox.writeFiles([{path, content, mode?}])`。
 
+### 部署实测补充（2026-09-03，已在代码中固化）
+
+- **函数签名**：必须用 **named route-handle 导出**（`export const GET/POST/…`）。`export default function` 会被 `@vercel/node` 当 legacy `(req,res)` 处理器，返回值被丢弃 → 请求无限挂起。运行时日志原文："default export returned a `Response` … export a fetch function or a named HTTP method"。
+- **`req.url` 是相对路径**（如 `/api/proxy`），裸 `new URL(req.url)` 抛 `ERR_INVALID_URL`；统一用 `new URL(req.url, 'http://vercel.internal')` 防御。
+- **legacy `api/` 路由的 `[...path].ts` 只吃单段**（`/api/proxy/a/b` 会 404）。多段路径靠 vercel.json rewrite 全部指向 `/api/proxy`（index 函数），函数内用 `req.url` 重建原始路径（已实测 `/api/pi-web/status` 正常）。
+- **rewrite 源模式**不支持嵌套捕获组（`invalid_rewrite`）；链式 lookahead `(?!a)(?!b)` 可用。
+- **沙箱安装需要 make/g++**：node-pty（pi-web 依赖）无 Linux prebuild，npm 安装会走 node-gyp；沙箱默认非 root → 需 `runCommand({ sudo: true })` 装 `make g++`（一次性，入快照）。
+- **npm 的 `/usr/local/bin/pi-web-*` 符号链接指向无 +x 的 dist .js**（shebang 无执行位 → "Permission denied"），每次 attach 后 `chmod +x` 三个 dist bin（幂等，便宜）。
+- **安装自愈**：`/data/pi-web/.installed` 标记文件 + 无条件幂等 BOOT_SCRIPT，覆盖 新建/恢复/中断安装 三种状态。
+- 首冷启动（创建+装工具链+npm 装 pi-web+boot）≈ 2.5 分钟；warm 后 ≈ 1.5s。M4 的 VCR 镜像可把冷启动降到 ~10s。
+
 
 ---
 
@@ -238,7 +249,7 @@ src/ + api/
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | 设计确认（本文档） | ✅ 完成（4 个决策点已确认） |
-| M1 | Function 层骨架：auth + stableId + sandbox.getOrCreate + HTTP/SSE 反代 | ✅ 代码完成 + typecheck 通过；待 Vercel 部署实测 |
+| M1 | Function 层骨架：auth + stableId + sandbox.getOrCreate + HTTP/SSE 反代 | ✅ **部署完成，端到端验证通过（2026-09-03）** |
 | M2 | 持久化验证：停止→恢复后数据仍在；快照不过期 | ⏳ 待 M1 部署后验证 |
 | M3 | WebSocket（终端 + 事件流） | ⏳ 未开始（当前 501） |
 | M4 | 自定义镜像（VCR）优化冷启动 | ⏳ 未开始 |

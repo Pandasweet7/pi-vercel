@@ -48,105 +48,70 @@
 
 ---
 
-## 二、PI-vercel（Vercel Sandbox + Functions）—— M1 代码完成，待部署实测
+## 二、PI-vercel（Vercel Sandbox + Functions）—— M1 部署完成 ✅
 
-### 仓库
-- 本地: `/root/pi-vercel`（已 git init，初始提交 `0a55bec`）
-- 尚未推送到 GitHub（需要新 token）
+### 仓库 / 部署
+- GitHub: `Pandasweet7/pi-vercel`（小写，Vercel 项目名也须小写），本地 `/root/pi-vercel`，分支 `main`
+- Vercel 项目 `pi-vercel`，生产域名 **https://pi-vercel-mu.vercel.app**
+- 最新远程提交 `afa18f6`，生产部署 READY/PROMOTED
+- 环境变量已在 Vercel 配置：SITE_USERNAME/SITE_PASSWORD（生产+预览）、BYOK 等
 
-### 设计文档
-- `/root/pi-vercel/docs/DESIGN.md` — 完整设计（架构/生命周期/风险/里程碑/版本策略，已同步 M1 实现状态）
+### 生产验证结果（2026-09-03 实测通过）
+- 无凭据 `/` → **401** "Authentication required" ✅
+- 正确凭据 `/` → **200** `<title>PI WEB</title>`（沙箱内 pi-web 1.202608.2 渲染）✅
+- `/api/pi-web/status` 经反代 → **200** 完整 JSON（installedVersion/runtimeVersion/piVersion 全对齐）✅
+- 任意未知路径（SPA fallback）→ 200 UI ✅
+- 沙箱公网 URL（sb-*.vercel.run）不出现在任何响应中 ✅
+- 首冷启动全链路（创建→装工具链→npm 装 pi-web→chmod→sessiond→server）≈ 2.5 分钟；warm 后 ≈ 1.5s ✅
 
-### 核心架构洞察
-Vercel Sandbox 是完整 Linux microVM（child_process/Docker/真文件系统/完整网络栈），pi-web 原样跑在里面。**不需要 EdgeOne 版那些补丁**（不 fork 客户端、不折叠代理、不 hook XHR、不手写快照——沙箱默认自动快照/恢复整个 32GB 盘）。
+### 部署期踩坑全记录（按发现顺序，均已在代码/文档固化）
 
-### 请求流
-```
-浏览器 → Vercel Function
-   1. Basic Auth（同 EdgeOne 契约）
-   2. fnv1a(SITE_USERNAME) → 沙箱名（每用户一个，天然跨浏览器）
-   3. Sandbox.getOrCreate()  ← 冷则毫秒级从快照 resume（整盘还原）
-   4. 幂等 BOOT_SCRIPT 拉起 pi-web-sessiond + pi-web-server + 就绪轮询
-   5. 反代 HTTP/SSE → 沙箱 8504 端口（流式，accept-encoding: identity）
-```
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | `Function Runtimes must have a valid version` | `functions.runtime` 填裸 `@vercel/node` | 删除 functions 块（Hobby maxDuration 默认/上限就是 300s） |
+| 2 | 函数不注册，全路径 404 | 函数在 `src/api/`，Vercel 只认根 `api/` | 移到 `api/proxy/` |
+| 3 | `ERR_MODULE_NOT_FOUND /var/task/src/lib/config` | ESM 相对导入缺 `.js` | 所有相对导入带 `.js`，保留 `"type": "module"` |
+| 4 | `Cannot use import statement outside a module` | 删掉 `type: module` 后 `@vercel/node` 仍输出 ESM 语法 | 恢复 `type: module`（与 #3 配套） |
+| 5 | `[[...path]]` 路由 404 | legacy api/ 路由不认可选 catch-all | 改 `index.ts` + `[...path].ts` |
+| 6 | `[...path]` 只吃**一段**（`/api/proxy/a/b` 404） | legacy 路由把 `[...path]` 当单段参数 | rewrite 全部非函数路径到 `/api/proxy` index，函数内用 `req.url` 重建原始路径 |
+| 7 | rewrite 嵌套捕获组 `(a|b)` 被拒 | `invalid_rewrite: ... invalid source pattern` | lookahead 改为链式 `(?!a)(?!b)`；诊断路径删除后只剩一条 `(?!api/proxy/)` |
+| 8 | 函数无限挂起（0 字节响应） | `export default` 被 `@vercel/node` 当 legacy `(req,res)`，返回值被丢弃 | 改用 **named route-handle 导出** `export const GET/POST/...`（运行时日志明说："export a fetch function or a named HTTP method"） |
+| 9 | `req.url` 是相对路径 → `ERR_INVALID_URL` | Vercel web handler 给 `req.url = /api/proxy` | `new URL(req.url, 'http://vercel.internal')` 防御 |
+| 10 | `keepLastSnapshots` 400 | 诊断端点把 4 字段投影对象当完整 cfg 传入（`count: undefined` 被 JSON 丢弃） | probe 传完整 AppConfig（真实路径无此 bug） |
+| 11 | npm install 失败：node-pty | 无 linux prebuild + 沙箱缺 make/g++ + 非 root 用户 | 失败后 `sudo: true` 的 `apt-get install make g++` 再重试；npm 缓存使重试很快 |
+| 12 | `sessiond: socket never appeared` | npm 生成的 `/usr/local/bin/pi-web-*` 符号链接指向无 +x 的 dist .js（shebang 没执行位） | 每次 attach 后 `chmod +x` 三个 dist bin |
 
-### 版本策略（已写入设计）
-- Vercel 用 **stock pi-web**（不需要 fork），直接装 npm 最新版
-- `@jmfederico/pi-web` = **1.202608.2**（当前最新）
-- `@earendil-works/pi-coding-agent` = **0.84.4**（pi-web 自带，^0.84.1 解析到此）
-- 版本常量集中在 `src/lib/versions.ts`
-- **Sandbox SDK**：`@vercel/sandbox` **3.2.1**（^1.x 无命名沙箱/持久化 API，已核实不可用）
+### 调试基建（已删除，勿在生产恢复）
+- 无鉴权的诊断端点（`/api/exec` 可执行任意沙箱命令）已全部删除；历史记录保留在 git log
+- 教训：任何诊断端点都要 Basic Auth 或临时环境变量门控
 
-### 已创建/实现的文件
-```
-PI-vercel/
-├─ docs/DESIGN.md           ★ 完整设计文档（已同步 M1）
-├─ src/lib/
-│  ├─ stableId.ts         ✅ fnv1a(用户名) → 沙箱名
-│  ├─ auth.ts             ✅ Basic Auth
-│  ├─ config.ts           ✅ env 读取（含 SANDBOX_* 字段）
-│  ├─ versions.ts         ✅ 版本常量（pi-web 1.202608.2, pi 0.84.4）
-│  ├─ sandbox.ts          ✅ M1：getOrCreate + BOOT_SCRIPT + waitForStatus + keepAlive
-│  └─ proxy.ts            ✅ M1：HTTP/SSE 流式反代（identity 编码；WS 待 M3）
-├─ api/proxy/index.ts + [...path].ts ✅ M1：auth→沙箱→反代 主入口（仓库根 api/）
-├─ vercel.json              ✅ rewrites + functions 配置（maxDuration 300）
-├─ package.json             ✅ @vercel/sandbox 3.2.1
-├─ tsconfig.json            ✅ strict + Bundler resolution
-└─ .env.example             ✅ 完整 env 契约
-```
+### 待办
+- [ ] 用户浏览器实测：对话 + SSE 流式 + 终端（WS 是 M3，当前 501）
+- [ ] `AI_GATEWAY_*` 环境变量目前**未配置**（runtime 报告 gatewayKey=false）——对话功能需要用户配置网关或 BYOK
+- [ ] M2：停止/恢复后快照持久化验证（快照已设永不过期，keepLastSnapshots=2）
+- [ ] M3：WebSocket 反代或 WS→SSE 桥（终端 + 事件流）
+- [ ] M4：VCR 自定义镜像（预装 pi-web + 工具链），把冷启动从 ~2.5min 降到 ~10s
+- [ ] README + 部署按钮
 
-### M1 关键实现决策
-- ❗ **`package.json` 必须保留 `"type": "module"`**：`@vercel/node` 输出的是 **ESM 语法**的 JS（不转成 require），没有该字段 Node 会把 `.js` 当 CJS 加载，报 "Cannot use import statement outside a module"（实际踩过）。同时**所有相对导入必须带 `.js` 扩展名**（Node ESM 解析器要求），否则 `ERR_MODULE_NOT_FOUND`（也踩过）。正确组合：`type: module` + 相对导入全写 `.js` 后缀。已用 `/var/task` 布局本地 ESM 冒烟测试验证（401/501/502 均符合预期）。
-- ❗ **不能用 `functions` 块配 maxDuration**：文件名的 `[[...path]]` 在 glob 里是字符类，键匹配不上会直接构建失败（"doesn't match any Serverless Functions"）；而 Hobby 默认 maxDuration 本就是 300s（上限也是 300s），该配置零收益。已删除 `functions` 块。
-- ❗ **路由入口**：不能用可选 catch-all 文件名 `[[...path]]` —— legacy `api/` 目录路由不认双括号（Next.js 的约定），会直接 404。改成两个明确入口：`api/proxy/index.ts`（根路径）+ `api/proxy/[...path].ts`（其余，单括号 catch-all），vercel.json 用两条 rewrite 分别路由 `/` 和 `/((?!api/proxy/).*)`。
-- **SDK 3.2.1**：`getOrCreate({name, resume, region, image?, resources:{vcpus}, timeout, ports, persistent, snapshotExpiration, keepLastSnapshots:{count}, env, onCreate, onResume})`；`domain(port)` 同步返回公网 origin；`runCommand` 返回 `CommandFinished`（异步 stdout()/stderr()）。
-- **幂等启动**：`onResume` 在沙箱已运行时不触发，故 getOrCreate 之后无条件跑 BOOT_SCRIPT（pidfile + kill -0 防重复；node fetch 探测 HTTP，不依赖 pgrep/curl）。
-- **两个进程**：`pi-web-sessiond`（先）→ `pi-web-server`（后），与官方 Docker 一致。
-- **密钥安全**：API key 只在 runCommand 的 per-command env 注入，不写进 `env:`（避免入快照）；models.json 用 `$AI_GATEWAY_API_KEY` 占位（pi 启动时按 env 展开）。
-- **反代**：`accept-encoding: identity` 上游 + 删响应 content-encoding/content-length + `cache-control: no-store`（防 gzip 缓冲 SSE，同 EdgeOne bug #1）。
-- **路径还原**：根路径由 `index.ts`（空 segments）落到 `/`；其余由 `[...path].ts` 落到 `/` + 各段。
-- **typecheck**：`npm run typecheck` 通过。
-
-### 4 个决策点（已确认 ✅）
-1. WS：先 Function WS beta 反代，跑不通再退 WS→SSE 桥。
-2. 镜像：v1 托管镜像+开机安装 → v2 VCR 自定义镜像。
-3. 区域：默认 iad1。
-4. 安全：所有流量只经 Function，不下发沙箱 URL。
+### 关键架构决策（已落地）
+- 用 stock pi-web（`@jmfederico/pi-web@1.202608.2`，pi 0.84.4），不做 fork
+- 每用户一个持久沙箱：`fnv1a(SITE_USERNAME)` → 沙箱名；snapshotExpiration=0（永不过期）
+- 密钥不进沙箱定义/快照：API key 只经 runCommand per-command env 注入；models.json 用 `$AI_GATEWAY_API_KEY` 占位
+- 幂等自愈启动：install 标记文件 + 无条件 BOOT_SCRIPT（pidfile + kill -0）；覆盖 创建/恢复/已运行/中断安装
+- 反代流式：`accept-encoding: identity` 上游；删 content-encoding/content-length；cache-control no-store
+- 路径重建：legacy 路由下用 req.url 还原原始路径（相对 URL 防御）
+- 函数签名：named HTTP-method 导出（GET/POST/PUT/PATCH/DELETE/OPTIONS/HEAD 全量）
 
 ### 里程碑
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | 设计确认 | ✅ 完成 |
-| M1 | Function 层骨架：auth + sandbox + HTTP/SSE 反代 | ✅ 代码完成 + typecheck 通过；待部署实测 |
-| M2 | 持久化验证 | ⏳ 待 M1 部署后验证 |
+| M1 | Function 层：auth + sandbox + HTTP/SSE 反代 | ✅ **部署完成，端到端验证通过** |
+| M2 | 持久化验证 | ⏳ 待浏览器实测后确认 |
 | M3 | WebSocket（终端 + 事件流） | ⏳ 未开始（当前 501） |
-| M4 | 自定义镜像（VCR）优化冷启动 | ⏳ 未开始 |
+| M4 | 自定义镜像（VCR）优化冷启动 | ⏳ 未开始（预估 2.5min → ~10s） |
 | M5 | 上线 + 部署按钮 + README | ⏳ 未开始 |
 
-### 本地验证（已做）
-- `npm run typecheck` 通过；额外用 CommonJS 配置编译一遍，产物可被 Node 直接 `require`。
-- 模拟 `/var/task` 布局做运行时冒烟测试（模拟 Lambda 目录结构）：
-  - 无凭据 → **401** + `WWW-Authenticate: Basic realm="PI WEB"` ✅
-  - 错误密码 → **401** ✅
-  - WS 升级 → **501**（M3 未实现，预期）✅
-  - 正确凭据 → 进到沙箱调用，本地无 OIDC 时报 502 带 SDK 提示 ✅
-
-### 下一步（M1 部署实测）
-- [ ] 获取新 GitHub token，创建 `Pandasweet7/PI-vercel` 并推送
-- [ ] 本地 `vercel link` + 配置 env（SITE_USERNAME/PASSWORD、AI_GATEWAY_*）
-- [ ] `vercel dev` 本地验证路由（可选 catch-all 根路径 + 反代）
-- [ ] 部署到 Vercel，验证：首页能出、SSE 流式、Basic Auth 生效
-- [ ] 验证沙箱公网 URL 不泄露（浏览器只接触 vercel.app）
-
-### Vercel 平台关键限制
-- Hobby: 单 session 最长 45min（Pro 24h），10 并发沙箱，5h CPU/月，420 GB-hr 内存/月
-- 磁盘 32GB NVMe（比 EdgeOne 的 512MB 大得多）
-- 持久化默认开启（自动快照/恢复），快照默认 30 天过期（已设 0=永不过期）
-- 仅美欧区域（iad1/sfo1/cle1/cdg1），无亚太
-- 沙箱暴露端口公网可达（已确认安全原则：仅经 Function 反代）
-- 预估单用户月费 ≈ $3-6（Hobby 免费额度内可覆盖）
-
----
 
 ## 三、两个仓库的关系
 
@@ -165,11 +130,14 @@ PI-vercel/
 - [ ] 清理 debug 端点（生产环境应移除 `/api/debug`）
 
 ### PI-vercel
-- [ ] 获取新 GitHub token（旧的已失效）推送后续修改
-- [ ] M1 部署实测：`vercel link` + 配 env + 部署验证（首页/SSE/Basic Auth/URL 不泄露）
+- [x] GitHub 仓库 `Pandasweet7/pi-vercel` 已建并推送（main）
+- [x] Vercel 项目 `pi-vercel` 已连，生产域名 pi-vercel-mu.vercel.app
+- [x] M1 部署实测：Basic Auth/首页/反代/URL 不泄露 全部验证通过
+- [ ] 用户浏览器实测（对话 + SSE 流式）
+- [ ] 配置 `AI_GATEWAY_*`（当前未配，对话功能需网关或 BYOK）
 - [ ] M2 持久化验证（停止→恢复后数据仍在）
-- [ ] M3 WebSocket（终端 + 事件流）
-- [ ] 创建 GitHub 仓库 `Pandasweet7/PI-vercel`
+- [ ] M3 WebSocket（终端 + 事件流，当前 501）
+- [ ] M4 VCR 自定义镜像（冷启动 2.5min → ~10s）
 
 ### 通用
 - [ ] EdgeOne 版和 Vercel 版的 README 各自写部署按钮
@@ -184,7 +152,7 @@ PI-vercel/
 | ❗ 函数目录 | `api/`（仓库根） | 不能用 `src/api/`，入口用 `index.ts`+`[...path].ts`（不能用 `[[...path]]`） |
 | EdgeOne 仓库 | `/root/pi-web-makers` | 已完成，HEAD=7d2f219 |
 | EdgeOne pi-web 源码 | `/root/pi-web-src` | fork 基底，用于重建 SPA |
-| Vercel 仓库 | `/root/pi-vercel` | M1 代码完成，HEAD=0a55bec |
+| Vercel 仓库 | `/root/pi-vercel` | M1 部署完成，HEAD=afa18f6，生产 https://pi-vercel-mu.vercel.app |
 | 设计文档 | `/root/pi-vercel/docs/DESIGN.md` | 完整设计（已同步 M1） |
 | Sandbox 生命周期 | `/root/pi-vercel/src/lib/sandbox.ts` | getOrCreate + BOOT_SCRIPT + keepAlive |
 | 反代 | `/root/pi-vercel/src/lib/proxy.ts` | HTTP/SSE 流式，identity 编码 |
