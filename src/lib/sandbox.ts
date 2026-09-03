@@ -19,9 +19,9 @@
  */
 
 import { Sandbox } from '@vercel/sandbox';
-import type { AppConfig } from './config';
-import { sandboxNameFor } from './stableId';
-import { PI_WEB_INSTALL_SPEC } from './versions';
+import type { AppConfig } from './config.js';
+import { sandboxNameFor } from './stableId.js';
+import { PI_WEB_INSTALL_SPEC } from './versions.js';
 
 /** Port the pi-web HTTP server listens on inside the sandbox. */
 export const PI_WEB_PORT = 8504;

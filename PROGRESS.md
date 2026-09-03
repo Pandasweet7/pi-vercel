@@ -96,6 +96,9 @@ PI-vercel/
 ```
 
 ### M1 关键实现决策
+- ❗ **不能用 `"type": "module"`**：Vercel Node 函数把 TS 直接编成 ESM 时，Node ESM 解析器要求相对导入带扩展名，否则运行时 `ERR_MODULE_NOT_FOUND`（实际踩过）。现 package.json 不含 `type` 字段（CJS 输出），且所有相对导入统一写 `.js` 后缀，**ESM/CJS 两种输出都能解析**。
+- ❗ **不能用 `functions` 块配 maxDuration**：文件名的 `[[...path]]` 在 glob 里是字符类，键匹配不上会直接构建失败（"doesn't match any Serverless Functions"）；而 Hobby 默认 maxDuration 本就是 300s（上限也是 300s），该配置零收益。已删除 `functions` 块。
+- ❗ **函数必须在仓库根 `api/`**，`src/api/` 不被自动检测。
 - **SDK 3.2.1**：`getOrCreate({name, resume, region, image?, resources:{vcpus}, timeout, ports, persistent, snapshotExpiration, keepLastSnapshots:{count}, env, onCreate, onResume})`；`domain(port)` 同步返回公网 origin；`runCommand` 返回 `CommandFinished`（异步 stdout()/stderr()）。
 - **幂等启动**：`onResume` 在沙箱已运行时不触发，故 getOrCreate 之后无条件跑 BOOT_SCRIPT（pidfile + kill -0 防重复；node fetch 探测 HTTP，不依赖 pgrep/curl）。
 - **两个进程**：`pi-web-sessiond`（先）→ `pi-web-server`（后），与官方 Docker 一致。
@@ -119,6 +122,14 @@ PI-vercel/
 | M3 | WebSocket（终端 + 事件流） | ⏳ 未开始（当前 501） |
 | M4 | 自定义镜像（VCR）优化冷启动 | ⏳ 未开始 |
 | M5 | 上线 + 部署按钮 + README | ⏳ 未开始 |
+
+### 本地验证（已做）
+- `npm run typecheck` 通过；额外用 CommonJS 配置编译一遍，产物可被 Node 直接 `require`。
+- 模拟 `/var/task` 布局做运行时冒烟测试（模拟 Lambda 目录结构）：
+  - 无凭据 → **401** + `WWW-Authenticate: Basic realm="PI WEB"` ✅
+  - 错误密码 → **401** ✅
+  - WS 升级 → **501**（M3 未实现，预期）✅
+  - 正确凭据 → 进到沙箱调用，本地无 OIDC 时报 502 带 SDK 提示 ✅
 
 ### 下一步（M1 部署实测）
 - [ ] 获取新 GitHub token，创建 `Pandasweet7/PI-vercel` 并推送
@@ -170,6 +181,7 @@ PI-vercel/
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
+| ❗ 函数目录 | `api/`（仓库根） | 不能用 `src/api/` |
 | EdgeOne 仓库 | `/root/pi-web-makers` | 已完成，HEAD=7d2f219 |
 | EdgeOne pi-web 源码 | `/root/pi-web-src` | fork 基底，用于重建 SPA |
 | Vercel 仓库 | `/root/pi-vercel` | M1 代码完成，HEAD=0a55bec |
