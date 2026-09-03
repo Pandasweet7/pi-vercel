@@ -73,7 +73,7 @@ export default async function handler(req: Request): Promise<Response> {
       user,
     );
     return {
-      id: r.sandbox.id,
+      name: r.sandbox.name,
       baseUrl: r.baseUrl,
       created: r.created,
       expiresAt: String(r.sandbox.expiresAt ?? ''),
