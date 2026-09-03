@@ -1,18 +1,26 @@
-// Catch-all: handles every path under /api/proxy/*.
-// TEMP-DIAG: dynamic import + full error echo to surface boot failures.
-export default async function handler(
-  req: Request,
-  context: { params?: { path?: string[] } | Promise<{ path?: string[] }> },
-): Promise<Response> {
-  try {
-    const { handleProxyRequest, extractSegments } = await import('../../src/lib/handler.js');
-    const segments = await extractSegments(context ?? {});
-    return await handleProxyRequest(req, segments);
-  } catch (e) {
-    const err = e as { stack?: string; message?: string };
-    return new Response(`BOOT_ERR(path): ${err?.stack ?? err?.message ?? String(e)}`, {
-      status: 599,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-    });
-  }
+// Catch-all entrypoint: serves every path under /api/proxy/* (rewritten from the
+// SPA + API routes). See index.ts for why this uses named route-handle exports
+// instead of a default export (default exports are legacy `(req,res)` style and
+// their return value is discarded -> requests hang).
+import {
+  extractSegments,
+  handleProxyRequest,
+  type PathParams,
+} from '../../src/lib/handler.js';
+
+type Ctx = { params?: PathParams | Promise<PathParams> } | undefined;
+
+function make() {
+  return async (req: Request, ctx: Ctx): Promise<Response> => {
+    const segments = await extractSegments(ctx ?? {});
+    return handleProxyRequest(req, segments);
+  };
 }
+
+export const GET = make();
+export const HEAD = make();
+export const POST = make();
+export const PUT = make();
+export const PATCH = make();
+export const DELETE = make();
+export const OPTIONS = make();

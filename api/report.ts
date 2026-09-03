@@ -59,7 +59,7 @@ function safeUrl(u: string): URL {
   }
 }
 
-export default async function handler(req: Request): Promise<Response> {
+async function handler(req: Request): Promise<Response> {
   const url = safeUrl(req.url);
   const user = url.searchParams.get('u') || 'diag-probe';
   const mode = url.searchParams.get('mode') || 'full'; // list | boot | full
@@ -129,3 +129,6 @@ export default async function handler(req: Request): Promise<Response> {
     headers: { 'content-type': 'application/json' },
   });
 }
+
+export const GET = handler;
+export const POST = handler;

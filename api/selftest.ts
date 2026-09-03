@@ -22,7 +22,7 @@ async function stage(name: string, fn: () => Promise<unknown>): Promise<void> {
   }
 }
 
-export default async function handler(): Promise<Response> {
+async function handler(): Promise<Response> {
   // [1] env presence (never values)
   steps.push({
     step: 'env',
@@ -78,3 +78,5 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
     new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout after ${ms}ms`)), ms)),
   ]);
 }
+
+export const GET = handler;
