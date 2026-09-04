@@ -41,6 +41,9 @@
 | `AI_GATEWAY_API_KEY` / `AI_GATEWAY_BASE_URL` / `AI_GATEWAY_MODEL` | | 走自建 AI 网关（OpenAI 兼容） |
 | 官方 BYOK key（下任选）：`ANTHROPIC_API_KEY` `OPENAI_API_KEY` `DEEPSEEK_API_KEY` `GEMINI_API_KEY` `NVIDIA_API_KEY` `OPENROUTER_API_KEY` `MISTRAL_API_KEY` `GROQ_API_KEY` `XAI_API_KEY` … | | pi 内置供应商，配了 key 即可选对应模型 |
 | 进阶：自定义供应商（models.json 模板） | | 见 [docs/DESIGN.md](docs/DESIGN.md)；key 仍只放 Vercel env，磁盘 models.json 用 `$VAR` 引用 |
+| `SANDBOX_REGION` | | 沙箱落区，**默认 `iad1`（美东）**。想用美西设 `sfo1`（美中 EU `cdg1`/`cle1`）。**只在沙箱首次创建时生效**：先部署后改此变量不会迁移已有沙箱（需删沙箱+重部署）。注意 Vercel 沙箱**暂无亚太区域** |
+
+> **「区域对齐」提醒**：`SANDBOX_REGION` 控制**沙箱**落区；而 **Function 区域**（`serverlessFunctionRegion`）是 Vercel **项目设置**（Project Settings → Functions → Region），不归 repo 管。部署后请把两者设成同一个区域，避免 Function↔沙箱跨区域往返延迟。
 
 完整清单与说明见 [.env.example](.env.example)。
 
