@@ -80,6 +80,7 @@
 | 10 | `keepLastSnapshots` 400 | 诊断端点把 4 字段投影对象当完整 cfg 传入（`count: undefined` 被 JSON 丢弃） | probe 传完整 AppConfig（真实路径无此 bug） |
 | 11 | npm install 失败：node-pty | 无 linux prebuild + 沙箱缺 make/g++ + 非 root 用户 | 失败后 `sudo: true` 的 `apt-get install make g++` 再重试；npm 缓存使重试很快 |
 | 12 | `sessiond: socket never appeared` | npm 生成的 `/usr/local/bin/pi-web-*` 符号链接指向无 +x 的 dist .js（shebang 没执行位） | 每次 attach 后 `chmod +x` 三个 dist bin |
+| 13 | 沙箱内 `pi-web restart` 失败：`systemctl --user ... exit 1` | Vercel Sandbox 是无 systemd 的 microVM；pi-web 官方重启命令依赖 systemd 用户服务 | 用 pidfile kill（`kill $(cat /data/pi-web/*.pid)`）+ 刷新页面，BOOT_SCRIPT 自动以新版重启（chmod 由代理层每次 attach 自动补） |
 
 ### 调试基建（已删除，勿在生产恢复）
 - 无鉴权的诊断端点（`/api/exec` 可执行任意沙箱命令）已全部删除；历史记录保留在 git log
