@@ -59,6 +59,10 @@ function secretEnv(cfg: AppConfig): Record<string, string> {
  *  - pidfile + `kill -0` guards (no pgrep dependency) prevent double-starts
  *  - sessiond removes its own stale socket on startup
  *  - HTTP readiness is probed with node fetch (curl may not be in the image)
+ *  - SELF-HEALING: a dying/stale process (e.g. user just killed it, or it
+ *    crashed leaving a pidfile) must never block boot. "pid alive but socket
+ *    missing" => kill the remnant and start fresh; "process died while waiting
+ *    for readiness" => restart once before giving up.
  */
 const BOOT_SCRIPT = String.raw`
 set -u
@@ -66,18 +70,50 @@ mkdir -p /data/home/projects /data/home /data/config/pi /data/pi-web/logs /data/
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
-# --- sessiond ---
-if alive /data/pi-web/sessiond.pid; then
-  echo "sessiond: already running (pid $(cat /data/pi-web/sessiond.pid))"
-else
+RESTARTED_SESSIOND=""
+RESTARTED_SERVER=""
+
+start_sessiond() {
+  rm -f "$PI_WEB_SESSIOND_SOCKET" /data/pi-web/sessiond.pid
   echo "sessiond: starting"
-  rm -f "$PI_WEB_SESSIOND_SOCKET"
   nohup pi-web-sessiond >>/data/pi-web/logs/sessiond.log 2>&1 &
   echo $! > /data/pi-web/sessiond.pid
+}
+
+start_server() {
+  rm -f /data/pi-web/server.pid
+  echo "server: starting"
+  nohup pi-web-server >>/data/pi-web/logs/server.log 2>&1 &
+  echo $! > /data/pi-web/server.pid
+}
+
+# --- sessiond ---
+if alive /data/pi-web/sessiond.pid && [ -S "$PI_WEB_SESSIOND_SOCKET" ]; then
+  echo "sessiond: already running (pid $(cat /data/pi-web/sessiond.pid))"
+else
+  if alive /data/pi-web/sessiond.pid; then
+    # Mid-shutdown or crashed-without-socket: don't trust it, replace it.
+    echo "sessiond: pid alive but socket missing -> killing stale process"
+    kill "$(cat /data/pi-web/sessiond.pid)" 2>/dev/null
+    for i in $(seq 1 10); do alive /data/pi-web/sessiond.pid || break; sleep 0.5; done
+    if alive /data/pi-web/sessiond.pid; then kill -9 "$(cat /data/pi-web/sessiond.pid)" 2>/dev/null; fi
+    RESTARTED_SESSIOND=1
+  fi
+  start_sessiond
 fi
 
 for i in $(seq 1 60); do
   [ -S "$PI_WEB_SESSIOND_SOCKET" ] && break
+  if ! alive /data/pi-web/sessiond.pid; then
+    if [ -z "$RESTARTED_SESSIOND" ]; then
+      echo "sessiond: exited while waiting for socket -> restarting once"
+      RESTARTED_SESSIOND=1
+      start_sessiond
+    else
+      echo "sessiond: exited again after restart"
+      break
+    fi
+  fi
   sleep 0.5
 done
 [ -S "$PI_WEB_SESSIOND_SOCKET" ] || { echo "sessiond: socket never appeared"; tail -n 40 /data/pi-web/logs/sessiond.log 2>/dev/null; exit 1; }
@@ -86,15 +122,18 @@ done
 if alive /data/pi-web/server.pid; then
   echo "server: already running (pid $(cat /data/pi-web/server.pid))"
 else
-  echo "server: starting"
-  nohup pi-web-server >>/data/pi-web/logs/server.log 2>&1 &
-  echo $! > /data/pi-web/server.pid
+  start_server
 fi
 
 for i in $(seq 1 120); do
   if node -e "fetch('http://127.0.0.1:8504/api/pi-web/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
     echo "server: ready"
     exit 0
+  fi
+  if ! alive /data/pi-web/server.pid && [ -z "$RESTARTED_SERVER" ]; then
+    echo "server: exited while waiting for readiness -> restarting once"
+    RESTARTED_SERVER=1
+    start_server
   fi
   sleep 0.5
 done
